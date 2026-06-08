@@ -107,6 +107,18 @@ static std::optional<causallm::ChatTemplate> g_chat_template;
 static std::string g_formatted_template;
 static std::string g_chat_template_name = "default";
 
+/**
+ * @brief Should CausalLM print/log every generated token while running?
+ *
+ * Streaming callers already receive token deltas via CallbackStreamer, so
+ * forcing the underlying CausalLM run into verbose mode duplicates every token
+ * through stdout/logcat. That extra synchronous I/O is especially expensive for
+ * fast decoder-only models such as LFM, where per-token host overhead can become
+ * visible. Keep generation quiet by default and let setOptions(...verbose=true)
+ * opt back into the diagnostic output when needed.
+ */
+static bool should_log_generation() { return g_verbose; }
+
 // Default handle backing the legacy non-handle API.
 static CausalLmModel &get_default_handle() {
   static CausalLmModel instance;
@@ -2004,9 +2016,9 @@ static ErrorCode run_model_streaming_on_handle(CausalLmModel &h,
 
 #if defined(_WIN32)
     m->run(std::wstring(input.begin(), input.end()), false, L"", L"",
-           g_verbose);
+           should_log_generation());
 #else
-    m->run(input, false, "", "", true);
+    m->run(input, false, "", "", should_log_generation());
 #endif
 
     h.last_output = m->getOutput(0);
