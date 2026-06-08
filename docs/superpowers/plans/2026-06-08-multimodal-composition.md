@@ -477,7 +477,7 @@ Progress:
 - Modify: `nntrainer/Applications/CausalLM/models/lfm2/lfm2_causallm.cpp`
 - Modify: `api/quick_dot_ai_api.cpp`
 
-- [ ] **Step 1: Write failing embedding consumer check**
+- [x] **Step 1: Write failing embedding consumer check**
 
 Construct or load LFM2 enough to assert:
 
@@ -489,7 +489,7 @@ model->run_with_embeddings(...)
 
 Expected initial result: FAIL because LFM2 does not override the base pointer-returning API.
 
-- [ ] **Step 2: Add stable lookup buffer**
+- [x] **Step 2: Add stable lookup buffer**
 
 Add a mutable scratch buffer inside `Lfm2CausalLM` so:
 
@@ -499,11 +499,11 @@ const void *lookupEmbedding(int token_id) const override;
 
 can return a pointer valid until the next lookup on the same model.
 
-- [ ] **Step 3: Override `embeddingBytesPerToken()`**
+- [x] **Step 3: Override `embeddingBytesPerToken()`**
 
 Return `sizeof(float) * DIM` for LFM2 FP32 embedding consumer.
 
-- [ ] **Step 4: Keep old vector API if existing code uses it**
+- [x] **Step 4: Keep old vector API if existing code uses it**
 
 Rename or keep:
 
@@ -513,7 +513,7 @@ std::vector<float> lookupEmbeddingVector(unsigned int token_id) const;
 
 and update `lfm2_vl_model.cpp` legacy code if needed.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run:
 
@@ -522,7 +522,13 @@ Run:
 ```
 
 Progress:
-- 2026-06-08: Pending.
+- 2026-06-08: Added `scripts/check_lfm2_embedding_consumer_contract.sh`. RED confirmed with `FAIL: Lfm2CausalLM.embeddingBytesPerToken() override is missing`.
+- 2026-06-08: Added `Lfm2CausalLM::embeddingBytesPerToken()` and base-pointer `lookupEmbedding(int) const` overrides.
+- 2026-06-08: Added `embedding_lookup_scratch_` as the stable per-model pointer buffer.
+- 2026-06-08: Renamed the vector-returning API to `lookupEmbeddingVector()` and updated LFM2-VL/internal call sites.
+- 2026-06-08: GREEN confirmed for `bash scripts/check_lfm2_embedding_consumer_contract.sh`.
+- 2026-06-08: Native verification passed with `./build.sh --target=api`.
+- 2026-06-08: Android/QNN verification passed with `./build.sh --platform=android --enable-qnn --target=api`.
 
 ---
 
