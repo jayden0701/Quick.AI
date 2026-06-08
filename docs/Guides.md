@@ -86,6 +86,7 @@ layout and the `register_model_descriptor` call convention.
 
 | Document | Topic |
 |---|---|
+| [Repository Orientation](RepositoryOrientation.md) | Current repo map, Android/native paths, build entry points |
 | [Native Architecture](Architecture.md) | Self-registration, model factory, native build outputs |
 | [Android Architecture](../Android/Architecture.md) | Current AAR/sample modules and planned REST service |
 | [Android Native Async & Streaming](../Android/AsyncAndStreaming.md) | C callback streaming through JNI |

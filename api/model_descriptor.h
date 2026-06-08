@@ -16,6 +16,14 @@ typedef enum {
 } RuntimeKind;
 
 typedef enum {
+  QDA_ROLE_UNKNOWN = 0,
+  QDA_ROLE_TEXT_LLM = 1,
+  QDA_ROLE_VISION_ENCODER = 2,
+  QDA_ROLE_CONNECTOR = 3,
+  QDA_ROLE_COMPOSITION = 4,
+} ModelRole;
+
+typedef enum {
   QDA_CAP_STREAMING = 1u << 0,
   QDA_CAP_MESSAGES_API = 1u << 1, /**< requires messages-based API */
   QDA_CAP_MULTIMODAL = 1u << 2,
@@ -42,6 +50,10 @@ typedef struct {
     *config_name; /**< g_model_registry lookup key e.g. "Qwen3-0.6B-W4A32" */
   const char
     *arch_string; /**< causallm::Factory key e.g. "Qwen3ForCausalLM" */
+  ModelRole role; /**< model/component role for composition-aware clients */
+  unsigned int embedding_dim; /**< output/input embedding dimension, if known */
+  const char
+    *compatible_with; /**< comma-separated compatible descriptor ids, optional */
 } ModelDescriptor;
 
 #ifdef __cplusplus

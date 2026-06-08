@@ -15,6 +15,7 @@
 #include "quick_dot_ai_qnn.h"
 #endif
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -201,6 +202,43 @@ static std::optional<ModelDescriptor> find_descriptor_by_id(const char *id) {
   return std::nullopt;
 }
 
+[[maybe_unused]] static bool descriptor_has_role(const ModelDescriptor &d,
+                                                ModelRole role) {
+  return d.role == role;
+}
+
+[[maybe_unused]] static bool descriptor_allows_backend(const ModelDescriptor &d,
+                                                       BackendType backend) {
+  const unsigned int bit = 1u << static_cast<unsigned int>(backend);
+  return (d.backend_mask & bit) != 0u;
+}
+
+[[maybe_unused]] static bool descriptor_compatible_with(const ModelDescriptor &d,
+                                                        const char *other_id) {
+  if (other_id == nullptr || other_id[0] == '\0' ||
+      d.compatible_with == nullptr || d.compatible_with[0] == '\0') {
+    return false;
+  }
+
+  std::stringstream ss(d.compatible_with);
+  std::string token;
+  while (std::getline(ss, token, ',')) {
+    token.erase(token.begin(),
+                std::find_if(token.begin(), token.end(), [](unsigned char c) {
+                  return !std::isspace(c);
+                }));
+    token.erase(std::find_if(token.rbegin(), token.rend(),
+                             [](unsigned char c) {
+                               return !std::isspace(c);
+                             })
+                  .base(),
+                token.end());
+    if (token == other_id)
+      return true;
+  }
+  return false;
+}
+
 // Library-owned buffer: rebuilt on every call and returned via c_str().
 // The pointer is valid only until the next call to getModelCatalogJson().
 static std::string g_catalog_json_cache;
@@ -240,7 +278,11 @@ extern "C" const char *getModelCatalogJson(void) {
        << json_escape(d.display_name ? d.display_name : d.id)
        << "\",\"runtime\":" << static_cast<int>(d.runtime)
        << ",\"backend_mask\":" << d.backend_mask
-       << ",\"capabilities\":" << d.capabilities << "}";
+       << ",\"capabilities\":" << d.capabilities
+       << ",\"role\":" << static_cast<int>(d.role)
+       << ",\"embedding_dim\":" << d.embedding_dim
+       << ",\"compatible_with\":\""
+       << json_escape(d.compatible_with ? d.compatible_with : "") << "\"}";
   }
   os << "]";
   g_catalog_json_cache = os.str();

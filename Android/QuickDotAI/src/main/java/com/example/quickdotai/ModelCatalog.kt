@@ -17,7 +17,8 @@ import android.util.Log
 import org.json.JSONArray
 
 enum class RuntimeKind { NATIVE, LITERT }
-enum class Capability { STREAMING, MESSAGES_API, MULTIMODAL, TOOL_USE, EMBEDDING, MULTI_IMAGE }
+enum class Capability { STREAMING, MESSAGES_API, MULTIMODAL, TOOL_USE, EMBEDDING, MULTI_IMAGE, VISION_ENCODER }
+enum class ModelRole { UNKNOWN, TEXT_LLM, VISION_ENCODER, CONNECTOR, COMPOSITION }
 
 data class ModelDescriptor(
     val id: String,
@@ -26,6 +27,9 @@ data class ModelDescriptor(
     val runtime: RuntimeKind,
     val backends: Set<BackendType>,
     val capabilities: Set<Capability>,
+    val role: ModelRole = ModelRole.UNKNOWN,
+    val embeddingDim: Int = 0,
+    val compatibleWith: List<String> = emptyList(),
 )
 
 /** String constants for public model ids (migration convenience). */
@@ -94,6 +98,9 @@ object ModelCatalog {
                 runtime = if (o.getInt("runtime") == 1) RuntimeKind.LITERT else RuntimeKind.NATIVE,
                 backends = decodeBackends(o.getInt("backend_mask")),
                 capabilities = decodeCaps(o.getInt("capabilities")),
+                role = decodeRole(o.optInt("role", 0)),
+                embeddingDim = o.optInt("embedding_dim", 0),
+                compatibleWith = decodeCompatibleWith(o.optString("compatible_with", "")),
             )
         }
     }
@@ -108,7 +115,16 @@ object ModelCatalog {
         if (bits and 0b001000 != 0) add(Capability.TOOL_USE)
         if (bits and 0b010000 != 0) add(Capability.EMBEDDING)
         if (bits and 0b100000 != 0) add(Capability.MULTI_IMAGE)
+        if (bits and 0b1000000 != 0) add(Capability.VISION_ENCODER)
     }
+
+    private fun decodeRole(value: Int): ModelRole =
+        ModelRole.values().getOrElse(value) { ModelRole.UNKNOWN }
+
+    private fun decodeCompatibleWith(value: String): List<String> =
+        value.split(',')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
 
     fun byId(id: String): ModelDescriptor? = all().firstOrNull { it.id == id }
     fun families(): List<String> = all().map { it.family }.distinct()
@@ -135,4 +151,25 @@ object ModelCatalog {
 
     /** selectable()에서 파생한 family 목록(families()와 동일 distinct 규칙). */
     fun selectableFamilies(): List<String> = selectable().map { it.family }.distinct()
+
+    fun compositions(): List<ModelDescriptor> =
+        all().filter { it.role == ModelRole.COMPOSITION }
+
+    fun llmOptionsForComposition(compositionId: String): List<ModelDescriptor> {
+        val composition = byId(compositionId) ?: return emptyList()
+        val allowed = composition.compatibleWith.toSet()
+        return all().filter { it.id in allowed && it.role == ModelRole.TEXT_LLM }
+    }
+
+    fun visionOptionsForLlm(llmModelId: String): List<ModelDescriptor> =
+        all().filter {
+            it.role == ModelRole.VISION_ENCODER && llmModelId in it.compatibleWith
+        }
+
+    fun connectorFor(llmModelId: String, visionModelId: String): ModelDescriptor? =
+        all().firstOrNull {
+            it.role == ModelRole.CONNECTOR &&
+                llmModelId in it.compatibleWith &&
+                visionModelId in it.compatibleWith
+        }
 }
