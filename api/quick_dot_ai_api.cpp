@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <cxxabi.h>
@@ -27,6 +28,7 @@
 #include <new>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -38,6 +40,7 @@
 #include "gptoss_cached_slim_causallm.h"
 #include "gptoss_causallm.h"
 #include "json.hpp"
+#include "lfm2_vl_connector.h"
 #include "model_config_internal.h"
 #include "model_descriptor.h"
 #include "multilingual_tinybert_16mb.h"
@@ -95,9 +98,69 @@ struct LoadedComponent {
   double initialization_duration_ms = 0.0;
 };
 
+struct ConnectorAdapter {
+  virtual ~ConnectorAdapter() = default;
+  virtual size_t output_embedding_dim() const = 0;
+  virtual std::vector<float> project(
+    const std::vector<float> &vision_features, int num_tokens) = 0;
+};
+
+class Lfm2ConnectorAdapter final : public ConnectorAdapter {
+public:
+  explicit Lfm2ConnectorAdapter(
+    std::unique_ptr<causallm::Lfm2VlConnector> connector)
+    : connector_(std::move(connector)) {
+    if (!connector_) {
+      throw std::invalid_argument("Lfm2ConnectorAdapter: connector is null");
+    }
+  }
+
+  size_t output_embedding_dim() const override {
+    return connector_->outFeatures();
+  }
+
+  std::vector<float> project(const std::vector<float> &vision_features,
+                             int num_tokens) override {
+    if (num_tokens <= 0) {
+      throw std::invalid_argument(
+        "Lfm2ConnectorAdapter: num_tokens must be positive");
+    }
+
+    const auto n_patches = static_cast<unsigned int>(num_tokens);
+    const auto patch_side =
+      static_cast<unsigned int>(std::sqrt(static_cast<double>(n_patches)));
+    if (patch_side * patch_side != n_patches) {
+      throw std::invalid_argument(
+        "Lfm2ConnectorAdapter: vision token count must be a square grid");
+    }
+
+    const unsigned int factor = connector_->downsampleFactor();
+    const unsigned int scale = factor * factor;
+    if (scale == 0 || connector_->inFeatures() % scale != 0) {
+      throw std::invalid_argument(
+        "Lfm2ConnectorAdapter: invalid connector input dimension");
+    }
+
+    const unsigned int embed_dim = connector_->inFeatures() / scale;
+    const size_t expected_size =
+      static_cast<size_t>(n_patches) * embed_dim;
+    if (vision_features.size() != expected_size) {
+      throw std::invalid_argument(
+        "Lfm2ConnectorAdapter: vision feature size does not match grid");
+    }
+
+    return connector_->project(vision_features, n_patches, embed_dim,
+                               patch_side, patch_side);
+  }
+
+private:
+  std::unique_ptr<causallm::Lfm2VlConnector> connector_;
+};
+
 struct CausalLmModel {
   std::mutex mtx;
   std::vector<LoadedComponent> components;
+  std::vector<std::unique_ptr<ConnectorAdapter>> connectors;
   std::vector<causallm::Transformer *> models;
   std::vector<std::string> architectures;
   std::vector<std::string> model_dirs;
@@ -129,6 +192,7 @@ static void clear_loaded_components(CausalLmModel &h) {
   h.architectures.clear();
   h.model_dirs.clear();
   h.initialization_duration_ms.clear();
+  h.connectors.clear();
   h.components.clear();
 }
 
@@ -858,6 +922,69 @@ static void fix_paths(json &nntr_cfg, const std::string &sub_dir) {
 static bool check_file_exists(const std::string &path) {
   struct stat buffer;
   return (stat(path.c_str(), &buffer) == 0);
+}
+
+static std::string normalized_model_base_path(const char *model_base_path) {
+  std::string base_dir =
+    (model_base_path != nullptr && strlen(model_base_path) > 0)
+      ? model_base_path
+      : "/sdcard/Download/aistudio-mobile/models/";
+  while (!base_dir.empty() && base_dir.back() == '/') {
+    base_dir.pop_back();
+  }
+  return base_dir;
+}
+
+static std::string descriptor_model_key(const ModelDescriptor &descriptor) {
+  if (descriptor.config_name != nullptr && descriptor.config_name[0] != '\0')
+    return descriptor.config_name;
+  if (descriptor.id != nullptr && descriptor.id[0] != '\0')
+    return descriptor.id;
+  if (descriptor.family != nullptr && descriptor.family[0] != '\0')
+    return descriptor.family;
+  throw std::invalid_argument("model descriptor has no load key");
+}
+
+static std::string descriptor_model_dir(const ModelDescriptor &descriptor,
+                                        ModelQuantizationType quant_type,
+                                        const char *model_base_path) {
+  return normalized_model_base_path(model_base_path) +
+         resolve_model_path(descriptor_model_key(descriptor), quant_type);
+}
+
+[[maybe_unused]] static std::unique_ptr<ConnectorAdapter>
+load_lfm2_connector_adapter(const ModelDescriptor &descriptor,
+                            ModelQuantizationType quant_type,
+                            const char *model_base_path) {
+  if (!descriptor_has_role(descriptor, QDA_ROLE_CONNECTOR)) {
+    throw std::invalid_argument("descriptor is not a connector");
+  }
+
+  const std::string model_dir =
+    descriptor_model_dir(descriptor, quant_type, model_base_path);
+  static const char *kWeightCandidates[] = {
+    "lfm2_vl_450m_connector.bin",
+    "lfm2_vl_connector.bin",
+    "connector.bin",
+    "pytorch_model.bin",
+  };
+
+  std::string weight_file;
+  for (const char *candidate : kWeightCandidates) {
+    const std::string path = model_dir + "/" + candidate;
+    if (check_file_exists(path)) {
+      weight_file = path;
+      break;
+    }
+  }
+  if (weight_file.empty()) {
+    throw std::runtime_error("connector weight file not found in " +
+                             model_dir);
+  }
+
+  auto connector = std::make_unique<causallm::Lfm2VlConnector>();
+  connector->loadWeights(weight_file);
+  return std::make_unique<Lfm2ConnectorAdapter>(std::move(connector));
 }
 
 static void validate_models() {

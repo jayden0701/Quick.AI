@@ -418,13 +418,13 @@ Progress:
 - Modify: `nntrainer/Applications/CausalLM/models/lfm2/lfm2-vl/lfm2_vl_connector.cpp`
 - Modify: `api/quick_dot_ai_api.cpp`
 
-- [ ] **Step 1: Write failing connector projection test**
+- [x] **Step 1: Write failing connector projection test**
 
 Use a tiny synthetic connector fixture where input features are known and verify that `project()` returns the expected LLM embedding shape.
 
 Expected initial result: FAIL because no connector adapter role exists.
 
-- [ ] **Step 2: Introduce connector base interface**
+- [x] **Step 2: Introduce connector base interface**
 
 Avoid forcing connector to inherit full `Transformer` if it does not need graph lifecycle.
 
@@ -439,11 +439,11 @@ struct ConnectorAdapter {
 };
 ```
 
-- [ ] **Step 3: Wrap `Lfm2VlConnector`**
+- [x] **Step 3: Wrap `Lfm2VlConnector`**
 
 Provide an adapter that owns `Lfm2VlConnector`, loads weights from descriptor-resolved model dir, and projects SigLIP/JEP(A) features into LFM hidden size.
 
-- [ ] **Step 4: Wire connector into `CausalLmModel`**
+- [x] **Step 4: Wire connector into `CausalLmModel`**
 
 Store connector components separately from `Transformer` components if needed:
 
@@ -451,7 +451,7 @@ Store connector components separately from `Transformer` components if needed:
 std::vector<std::unique_ptr<ConnectorAdapter>> connectors;
 ```
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run:
 
@@ -460,7 +460,13 @@ Run:
 ```
 
 Progress:
-- 2026-06-08: Pending.
+- 2026-06-08: Added `scripts/check_multimodal_connector_contract.sh`. RED confirmed with `FAIL: ConnectorAdapter interface is missing`.
+- 2026-06-08: Added API-layer `ConnectorAdapter`, `Lfm2ConnectorAdapter`, and `CausalLmModel.connectors` ownership.
+- 2026-06-08: Added `Lfm2VlConnector::project()` and a downsample-factor accessor in nntrainer.
+- 2026-06-08: Added descriptor-based LFM2 connector weight lookup that calls `connector->loadWeights(...)`.
+- 2026-06-08: GREEN confirmed for `bash scripts/check_multimodal_connector_contract.sh`.
+- 2026-06-08: Native verification passed with `./build.sh --target=api`.
+- 2026-06-08: Android/QNN verification passed with `./build.sh --platform=android --enable-qnn --target=api`.
 
 ---
 
