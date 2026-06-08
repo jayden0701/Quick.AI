@@ -95,6 +95,15 @@ struct CausalLmModel {
   std::vector<double> initialization_duration_ms;
   bool initialized = false;
   int kv_len = 0;
+
+  /**
+   * Formatted prompt prefix that is already represented by the model KV cache.
+   *
+   * CausalLM backends keep generated tokens in KV cache after a turn.  When the
+   * next chat request is the previous transcript plus new text, the API can send
+   * only the uncached suffix instead of pre-filling the whole transcript again.
+   */
+  std::string cached_prompt_prefix;
 };
 
 // Globals shared across all handles — options set via setOptions() apply
@@ -420,7 +429,22 @@ static std::string trim_wrapping_newlines(std::string value) {
   return value;
 }
 
-static void reset_handle_session_state(CausalLmModel &h) { h.kv_len = 0; }
+static void reset_handle_session_state(CausalLmModel &h) {
+  h.kv_len = 0;
+  h.cached_prompt_prefix.clear();
+}
+
+static bool starts_with_string(const std::string &value,
+                               const std::string &prefix) {
+  return value.size() >= prefix.size() &&
+         value.compare(0, prefix.size(), prefix) == 0;
+}
+
+struct PreparedModelInput {
+  std::string execute_input;
+  std::string formatted_prompt;
+  bool used_cached_prefix = false;
+};
 
 static void update_handle_session_after_run(CausalLmModel &h,
                                             size_t model_index) {
@@ -535,26 +559,59 @@ static ErrorCode reset_qnn_kv_cache_on_handle(CausalLmModel &h) {
 #endif
 }
 
-static std::string prepare_input_for_model(CausalLmModel &h, size_t model_index,
-                                           const std::string &input,
-                                           bool input_already_formatted) {
+static PreparedModelInput prepare_input_for_model(
+  CausalLmModel &h, size_t model_index, const std::string &input,
+  bool input_already_formatted) {
+  PreparedModelInput prepared;
+
   if (model_index >= h.architectures.size() || !g_use_chat_template) {
-    return input;
+    prepared.execute_input = input;
+    prepared.formatted_prompt = input;
+    return prepared;
   }
 
   const std::string &architecture = h.architectures[model_index];
+  prepared.formatted_prompt = input_already_formatted
+                                ? input
+                                : apply_chat_template(architecture, input);
+
   if (h.kv_len > 0) {
     const auto *cb = ModelCallbackRegistry::instance().lookup(architecture);
     if (cb && cb->incremental_prompt) {
-      return cb->incremental_prompt(input);
+      std::string incremental =
+        cb->incremental_prompt(prepared.formatted_prompt);
+      if (!incremental.empty()) {
+        prepared.execute_input = std::move(incremental);
+        prepared.used_cached_prefix = true;
+        return prepared;
+      }
+    }
+
+    // Generic fast path for architectures without a plugin callback (including
+    // LFM-style CausalLM builds): if the caller sends a full formatted chat
+    // transcript that extends the cached transcript exactly, only prefill the
+    // suffix. This keeps correctness conservative because any template or
+    // whitespace mismatch falls back to the full prompt.
+    if (!h.cached_prompt_prefix.empty() &&
+        starts_with_string(prepared.formatted_prompt, h.cached_prompt_prefix) &&
+        prepared.formatted_prompt.size() > h.cached_prompt_prefix.size()) {
+      prepared.execute_input =
+        prepared.formatted_prompt.substr(h.cached_prompt_prefix.size());
+      prepared.used_cached_prefix = true;
+      return prepared;
     }
   }
 
-  if (input_already_formatted) {
-    return input;
-  }
+  prepared.execute_input = prepared.formatted_prompt;
+  return prepared;
+}
 
-  return apply_chat_template(architecture, input);
+static void update_cached_prompt_prefix_after_run(
+  CausalLmModel &h, const PreparedModelInput &prepared) {
+  // Best-effort transcript mirror: the next OpenAI/messages call normally
+  // includes the assistant text that was just generated. If its formatted
+  // prompt starts with this mirror, prepare_input_for_model() can skip it.
+  h.cached_prompt_prefix = prepared.formatted_prompt + h.last_output;
 }
 
 static std::string get_quantization_suffix(ModelQuantizationType type) {
@@ -1388,8 +1445,9 @@ static ErrorCode run_on_handle(CausalLmModel &h, const char *inputTextPrompt,
 
   try {
     auto &model = *h.models[model_index];
-    std::string input = prepare_input_for_model(
+    PreparedModelInput prepared = prepare_input_for_model(
       h, model_index, std::string(inputTextPrompt), input_already_formatted);
+    const std::string &input = prepared.execute_input;
 
 // We assume single batch request for this API
 #if defined(_WIN32)
@@ -1402,6 +1460,7 @@ static ErrorCode run_on_handle(CausalLmModel &h, const char *inputTextPrompt,
     h.last_output = model.getOutput(0);
     *outputText = h.last_output.c_str();
     update_handle_session_after_run(h, model_index);
+    update_cached_prompt_prefix_after_run(h, prepared);
   } catch (const std::exception &e) {
     LOGE("Exception in run_on_handle: %s", e.what());
     return CAUSAL_LM_ERROR_INFERENCE_FAILED;
@@ -1987,15 +2046,16 @@ static ErrorCode run_model_streaming_on_handle(CausalLmModel &h,
   } detach_guard{m};
 
   try {
-    std::string input = prepare_input_for_model(h, model_index, raw_input,
-                                                input_already_formatted);
+    PreparedModelInput prepared = prepare_input_for_model(
+      h, model_index, raw_input, input_already_formatted);
+    const std::string &input = prepared.execute_input;
 
     LOGD("[DEBUG]   raw input length: %zu", raw_input.length());
     LOGD("[DEBUG]   g_use_chat_template: %d", g_use_chat_template);
     if (input_already_formatted) {
       LOGD("[DEBUG]   input_already_formatted=1, using pre-formatted input "
-           "(length: %zu)",
-           input.length());
+           "(length: %zu, cached_prefix=%d)",
+           input.length(), prepared.used_cached_prefix ? 1 : 0);
     } else {
       LOGD("[DEBUG]   input_already_formatted=0, applying chat template");
       LOGD("[DEBUG]   model input length: %zu", input.length());
@@ -2011,6 +2071,7 @@ static ErrorCode run_model_streaming_on_handle(CausalLmModel &h,
 
     h.last_output = m->getOutput(0);
     update_handle_session_after_run(h, model_index);
+    update_cached_prompt_prefix_after_run(h, prepared);
 
     if (m->hasRun()) {
       auto im = m->getPerformanceMetrics();
@@ -2428,10 +2489,11 @@ ErrorCode runMultimodalHandleStreaming(CausalLmHandle handle,
     raw_input.find("<|turn_start|>") != std::string::npos ||
     raw_input.find("<|im_start|>") != std::string::npos ||
     raw_input.find("<start_of_turn>") != std::string::npos;
-  std::string input =
+  PreparedModelInput prepared =
     prepare_input_for_model(h, 1, raw_input, input_already_formatted);
 
-  return execute_multimodal(h, h.models[1].get(), image_embeds, input,
+  return execute_multimodal(h, h.models[1].get(), image_embeds,
+                            prepared.execute_input,
                             callback, user_data);
 #else
   LOGE("[DEBUG] runMultimodalHandleStreaming: built without ENABLE_QNN");
