@@ -598,7 +598,7 @@ Progress:
 - Modify: QNN vision component files under `src/models/qnn/` as needed.
 - Modify: Android preprocessing selection.
 
-- [ ] **Step 1: Write failing mixed backend load test**
+- [x] **Step 1: Write failing mixed backend load test**
 
 Use composition JSON:
 
@@ -613,15 +613,15 @@ Use composition JSON:
 
 Expected initial result: FAIL until per-component backend load is wired.
 
-- [ ] **Step 2: Ensure QNN env setup is per component**
+- [x] **Step 2: Ensure QNN env setup is per component**
 
 Call QNN backend config setup before QNN vision component initialization.
 
-- [ ] **Step 3: Implement multi-image vision path**
+- [x] **Step 3: Implement multi-image vision path**
 
 Remove the temporary V-JEPA multi-image delegation that uses only the first image.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run:
 
@@ -636,7 +636,14 @@ Then device smoke via:
 ```
 
 Progress:
-- 2026-06-08: Pending.
+- 2026-06-08: Added `scripts/check_lfm2_jepa_mixed_backend_contract.sh`. RED confirmed with `FAIL: LFM2+JEPA mixed-backend composition matcher is missing`.
+- 2026-06-08: Added `is_lfm2_jepa_mixed_backend_composition()` and `load_lfm2_jepa_composition_handle()` for CPU LLM, NPU vision, and CPU connector loading.
+- 2026-06-08: Reused per-component `load_transformer_component()` so QNN backend setup happens inside the selected NPU vision component load path.
+- 2026-06-08: Replaced the multi-image first-image stub with patch-layout validation and aggregate original-dimension handling.
+- 2026-06-08: GREEN confirmed for `bash scripts/check_lfm2_jepa_mixed_backend_contract.sh`.
+- 2026-06-08: Native verification passed with `./build.sh --target=api`.
+- 2026-06-08: Android/QNN verification passed with `./build.sh --platform=android --enable-qnn --target=api`.
+- 2026-06-08: Device smoke via `./apk-build-install.sh` was not run because JEPA QNN assets/device runtime are not present in the workspace.
 
 ---
 

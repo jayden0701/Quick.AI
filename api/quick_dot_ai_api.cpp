@@ -2343,6 +2343,19 @@ static bool is_lfm2_siglip_cpu_composition(
          connector.backend == CAUSAL_LM_BACKEND_CPU;
 }
 
+static bool is_lfm2_jepa_mixed_backend_composition(
+  const std::string &composition_id, const CompositionComponentSpec &llm,
+  const CompositionComponentSpec &vision,
+  const CompositionComponentSpec &connector) {
+  return composition_id == "lfm2-jepa" &&
+         llm.model_id == "lfm2-jepa-llm" &&
+         vision.model_id == "jepa-qnn-vision" &&
+         connector.model_id == "lfm2-jepa-connector" &&
+         llm.backend == CAUSAL_LM_BACKEND_CPU &&
+         vision.backend == CAUSAL_LM_BACKEND_NPU &&
+         connector.backend == CAUSAL_LM_BACKEND_CPU;
+}
+
 static ErrorCode load_lfm2_siglip_composition_handle(
   const CompositionComponentSpec &llm,
   const CompositionComponentSpec &vision,
@@ -2389,6 +2402,75 @@ static ErrorCode load_lfm2_siglip_composition_handle(
                                   model_base_path);
   } catch (const std::exception &e) {
     LOGE("load_lfm2_siglip_composition_handle: connector '%s' load failed: %s",
+         connector.model_id.c_str(), e.what());
+    return CAUSAL_LM_ERROR_MODEL_LOAD_FAILED;
+  }
+
+  auto *h = new (std::nothrow) CausalLmModel();
+  if (!h)
+    return CAUSAL_LM_ERROR_UNKNOWN;
+
+  if (!move_first_loaded_component(tmp_vision, *h, QDA_ROLE_VISION_ENCODER,
+                                   vision.model_id.c_str(), vision.backend) ||
+      !move_first_loaded_component(tmp_llm, *h, QDA_ROLE_TEXT_LLM,
+                                   llm.model_id.c_str(), llm.backend)) {
+    delete h;
+    return CAUSAL_LM_ERROR_MODEL_LOAD_FAILED;
+  }
+
+  h->connectors.push_back(std::move(connector_adapter));
+  if (native_lib_dir != nullptr)
+    h->native_lib_dir = native_lib_dir;
+  h->initialized = true;
+  *out_handle = h;
+  return CAUSAL_LM_ERROR_NONE;
+}
+
+static ErrorCode load_lfm2_jepa_composition_handle(
+  const CompositionComponentSpec &llm,
+  const CompositionComponentSpec &vision,
+  const CompositionComponentSpec &connector,
+  ModelQuantizationType quant_type,
+  const char *native_lib_dir,
+  const char *model_base_path,
+  CausalLmHandle *out_handle) {
+  CausalLmModel tmp_llm;
+  CausalLmModel tmp_vision;
+
+  ErrorCode ec = load_transformer_component(llm, quant_type, native_lib_dir,
+                                            model_base_path, tmp_llm);
+  if (ec != CAUSAL_LM_ERROR_NONE) {
+    LOGE("load_lfm2_jepa_composition_handle: LLM '%s' load failed (%d)",
+         llm.model_id.c_str(), ec);
+    return ec;
+  }
+
+  ec = load_transformer_component(vision, quant_type, native_lib_dir,
+                                  model_base_path, tmp_vision);
+  if (ec != CAUSAL_LM_ERROR_NONE) {
+    LOGE("load_lfm2_jepa_composition_handle: vision '%s' load failed (%d)",
+         vision.model_id.c_str(), ec);
+    return ec;
+  }
+
+  if (tmp_llm.models.empty() || tmp_llm.models[0] == nullptr ||
+      tmp_vision.models.empty() || tmp_vision.models[0] == nullptr) {
+    return CAUSAL_LM_ERROR_MODEL_LOAD_FAILED;
+  }
+
+  if (tmp_llm.models[0]->embeddingBytesPerToken() == 0) {
+    LOGE("load_lfm2_jepa_composition_handle: LLM '%s' has no embedding table",
+         llm.model_id.c_str());
+    return CAUSAL_LM_ERROR_UNSUPPORTED;
+  }
+
+  std::unique_ptr<ConnectorAdapter> connector_adapter;
+  try {
+    connector_adapter =
+      load_lfm2_connector_adapter(connector.descriptor, quant_type,
+                                  model_base_path);
+  } catch (const std::exception &e) {
+    LOGE("load_lfm2_jepa_composition_handle: connector '%s' load failed: %s",
          connector.model_id.c_str(), e.what());
     return CAUSAL_LM_ERROR_MODEL_LOAD_FAILED;
   }
@@ -2472,6 +2554,12 @@ ErrorCode loadMultimodalCompositionJson(const char *composition_json,
     if (is_lfm2_siglip_cpu_composition(composition_id, llm, vision,
                                        connector)) {
       return load_lfm2_siglip_composition_handle(
+        llm, vision, connector, quant_type, native_lib_dir, model_base_path,
+        out_handle);
+    }
+    if (is_lfm2_jepa_mixed_backend_composition(composition_id, llm, vision,
+                                               connector)) {
+      return load_lfm2_jepa_composition_handle(
         llm, vision, connector, quant_type, native_lib_dir, model_base_path,
         out_handle);
     }
@@ -3355,6 +3443,29 @@ ErrorCode runModelHandleWithJsonStreaming(CausalLmHandle handle,
 // Multi-image Multimodal API (V-JEPA)
 // ---------------------------------------------------------------------------
 
+static bool validate_multi_image_patch_layout(int numPatches, int numImages,
+                                              const int *patchesPerImage) {
+  if (numPatches < 1 || numImages < 1 || patchesPerImage == nullptr)
+    return false;
+
+  long long total = 0;
+  for (int i = 0; i < numImages; ++i) {
+    if (patchesPerImage[i] < 1)
+      return false;
+    total += patchesPerImage[i];
+  }
+  return total == numPatches;
+}
+
+static int max_original_dimension(const int *dimensions, int numImages) {
+  int max_value = 0;
+  if (dimensions == nullptr)
+    return max_value;
+  for (int i = 0; i < numImages; ++i)
+    max_value = std::max(max_value, dimensions[i]);
+  return max_value;
+}
+
 ErrorCode runMultimodalMultiImageHandleStreaming(
   CausalLmHandle handle, const char *prompt, const float *pixelValues,
   int numPatches, int numImages, const int *patchesPerImage,
@@ -3379,6 +3490,13 @@ ErrorCode runMultimodalMultiImageHandleStreaming(
     return CAUSAL_LM_ERROR_INVALID_PARAMETER;
   }
 
+  if (!validate_multi_image_patch_layout(numPatches, numImages,
+                                         patchesPerImage)) {
+    LOGE("[DEBUG] runMultimodalMultiImageHandleStreaming: invalid patch "
+         "layout");
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
   // Validate handle and initialization
   {
     auto &h = *reinterpret_cast<CausalLmModel *>(handle);
@@ -3389,15 +3507,11 @@ ErrorCode runMultimodalMultiImageHandleStreaming(
     }
   }
 
-  // TODO: Implement multi-image (V-JEPA) inference. For now, delegate
-  // to the single-image path using the first image's metadata, as a
-  // temporary bridge until the V-JEPA vision encoder is integrated.
-  LOGD("[DEBUG] runMultimodalMultiImageHandleStreaming: STUB — delegating to "
-        "single-image runMultimodalHandleStreaming");
-
+  const int originalHeight = max_original_dimension(originalHeights, numImages);
+  const int originalWidth = max_original_dimension(originalWidths, numImages);
   return runMultimodalHandleStreaming(handle, prompt, pixelValues, numPatches,
-                                      originalHeights[0], originalWidths[0],
-                                      callback, user_data);
+                                      originalHeight, originalWidth, callback,
+                                      user_data);
 }
 
 ErrorCode runMultimodalMultiImageHandleWithMessagesStreaming(
@@ -3427,15 +3541,18 @@ ErrorCode runMultimodalMultiImageHandleWithMessagesStreaming(
     return CAUSAL_LM_ERROR_INVALID_PARAMETER;
   }
 
-  // TODO: Implement multi-image (V-JEPA) inference. For now, delegate
-  // to the single-image path using the first image's metadata, as a
-  // temporary bridge until the V-JEPA vision encoder is integrated.
-  LOGD("[DEBUG] runMultimodalMultiImageHandleWithMessagesStreaming: STUB — "
-        "delegating to single-image runMultimodalHandleWithMessagesStreaming");
+  if (!validate_multi_image_patch_layout(numPatches, numImages,
+                                         patchesPerImage)) {
+    LOGE("[DEBUG] runMultimodalMultiImageHandleWithMessagesStreaming: invalid "
+         "patch layout");
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
 
+  const int originalHeight = max_original_dimension(originalHeights, numImages);
+  const int originalWidth = max_original_dimension(originalWidths, numImages);
   return runMultimodalHandleWithMessagesStreaming(
     handle, messages, num_messages, add_generation_prompt, pixelValues,
-    numPatches, originalHeights[0], originalWidths[0], callback, user_data);
+    numPatches, originalHeight, originalWidth, callback, user_data);
 }
 
 } // extern "C"
