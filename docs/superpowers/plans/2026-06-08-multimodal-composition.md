@@ -657,17 +657,17 @@ Progress:
 - Modify: `Android/QuickDotAI/README.md`
 - Modify: `Android/Architecture.md`
 
-- [ ] **Step 1: Write failing Kotlin compile check**
+- [x] **Step 1: Write failing Kotlin compile check**
 
 Add `LoadModelRequest` fields and use them in `NativeQuickDotAI.load()`.
 
 Expected initial result: FAIL until JNI declaration exists.
 
-- [ ] **Step 2: Build composition JSON in Kotlin**
+- [x] **Step 2: Build composition JSON in Kotlin**
 
 In `NativeQuickDotAI.load()`, if `compositionId` is non-null, call `loadMultimodalCompositionJsonNative`.
 
-- [ ] **Step 3: Update model key**
+- [x] **Step 3: Update model key**
 
 Make `modelKey` include composition and per-component backends:
 
@@ -675,7 +675,7 @@ Make `modelKey` include composition and per-component backends:
 compositionId:llmModelId:llmBackend:visionModelId:visionBackend:connectorModelId:connectorBackend:quant
 ```
 
-- [ ] **Step 4: Update SampleTestAPP UI**
+- [x] **Step 4: Update SampleTestAPP UI**
 
 Add separate controls:
 
@@ -687,11 +687,11 @@ Connector display
 
 For now connector can be read-only after LLM/Vision selection.
 
-- [ ] **Step 5: Select processor by vision id**
+- [x] **Step 5: Select processor by vision id**
 
 Use SigLIP preprocessing for `siglip-lfm2-vision`, JEPA preprocessing for `jepa-qnn-vision`.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 Run:
 
@@ -701,7 +701,15 @@ cd Android
 ```
 
 Progress:
-- 2026-06-08: Pending.
+- 2026-06-08: Added `scripts/check_android_composition_contract.sh`. RED confirmed with `FAIL: LoadModelRequest.compositionId is missing`.
+- 2026-06-08: Added composition/component fields to `LoadModelRequest` and expanded `modelKey` to include composition id, component ids, per-component backends, and quantization.
+- 2026-06-08: Updated `NativeQuickDotAI.load()` to build composition JSON and call `loadMultimodalCompositionJsonNative()` when `compositionId` is set.
+- 2026-06-08: Added `NativeImageProcessor`, `SigLipNaFlexImageProcessor`, and `JepaImageProcessor`; native multimodal preprocessing now selects by vision model id.
+- 2026-06-08: Updated SampleTestAPP model/chat UI with composition, LLM component/backend, vision encoder/backend, and read-only connector controls.
+- 2026-06-08: GREEN confirmed for `bash scripts/check_android_composition_contract.sh`.
+- 2026-06-08: Kotlin verification passed with `cd Android && ./gradlew :QuickDotAI:compileDebugKotlin :SampleTestAPP:compileDebugKotlin`.
+- 2026-06-08: Native verification passed with `./build.sh --target=api`.
+- 2026-06-08: Android/QNN verification passed with `./build.sh --platform=android --enable-qnn --target=api`.
 
 ---
 

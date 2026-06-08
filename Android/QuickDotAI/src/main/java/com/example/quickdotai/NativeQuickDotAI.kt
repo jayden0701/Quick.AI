@@ -13,6 +13,8 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import android.util.Log
 import java.io.File
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * @brief Kotlin wrapper around a single `CausalLmHandle` in native code.
@@ -36,13 +38,16 @@ class NativeQuickDotAI(
     private var loaded: Boolean = false
 
     // Image processor for multimodal inference
-    private var imageProcessor: LlavaNextImageProcessor? = null
+    private var imageProcessor: NativeImageProcessor? = null
 
     // Vision backend type (null = text-only mode)
     private var visionBackend: BackendType? = null
 
     // Currently loaded model ID — used to route multi-image vs single-image paths
     private var currentModelId: String? = null
+
+    // Currently loaded vision component ID, when a native composition is active
+    private var currentVisionModelId: String? = null
 
     override fun load(req: LoadModelRequest): BackendResult<Unit> {
         Log.i(
@@ -84,38 +89,112 @@ class NativeQuickDotAI(
         }
 
         return try {
-            Log.i(TAG, "load(): calling loadModelHandleByNameNative(backend=${req.backend.ordinal}, " +
-                "modelId=${req.modelId}, quant=${req.quantization.ordinal}, " +
-                "nativeLibDir=${req.nativeLibDir}, modelBasePath=$modelBasePath)")
-            val h = NativeCausalLm.loadModelHandleByNameNative(
-                backend = mapBackend(req.backend),
-                modelId = req.modelId,
-                quant = mapQuant(req.quantization),
-                nativeLibDir = req.nativeLibDir,
-                modelBasePath = modelBasePath,
-            )
+            val h = if (req.compositionId != null) {
+                val compositionJson = buildMultimodalCompositionJson(req)
+                Log.i(TAG, "load(): calling loadMultimodalCompositionJsonNative(" +
+                    "compositionId=${req.compositionId}, quant=${req.quantization.ordinal}, " +
+                    "nativeLibDir=${req.nativeLibDir}, modelBasePath=$modelBasePath)")
+                NativeCausalLm.loadMultimodalCompositionJsonNative(
+                    compositionJson = compositionJson,
+                    quant = mapQuant(req.quantization),
+                    nativeLibDir = req.nativeLibDir,
+                    modelBasePath = modelBasePath,
+                )
+            } else {
+                Log.i(TAG, "load(): calling loadModelHandleByNameNative(backend=${req.backend.ordinal}, " +
+                    "modelId=${req.modelId}, quant=${req.quantization.ordinal}, " +
+                    "nativeLibDir=${req.nativeLibDir}, modelBasePath=$modelBasePath)")
+                NativeCausalLm.loadModelHandleByNameNative(
+                    backend = mapBackend(req.backend),
+                    modelId = req.modelId,
+                    quant = mapQuant(req.quantization),
+                    nativeLibDir = req.nativeLibDir,
+                    modelBasePath = modelBasePath,
+                )
+            }
             if (h == 0L) {
-                Log.e(TAG, "load(): loadModelHandleByNameNative returned 0 for '${req.modelId}'")
+                Log.e(TAG, "load(): native load returned 0 for '${req.modelKey}'")
                 BackendResult.Err(
                     QuickAiError.MODEL_LOAD_FAILED,
-                    "loadModelHandleByName failed for '${req.modelId}'"
+                    "native load failed for '${req.modelKey}'"
                 )
             } else {
                 handle = h
                 loaded = true
-                architecture = req.modelId
-                currentModelId = req.modelId
+                architecture = req.compositionId ?: req.modelId
+                currentModelId = req.compositionId ?: req.modelId
+                currentVisionModelId = req.visionModelId
                 visionBackend = req.visionBackend
-                if (req.visionBackend != null) {
-                    imageProcessor = LlavaNextImageProcessor(appContext)
-                    Log.i(TAG, "load(): visionBackend=${req.visionBackend}, image processor initialized")
+                imageProcessor = if (req.visionBackend != null || req.visionModelId != null) {
+                    processorForVisionModel(req.visionModelId ?: req.modelId)
+                } else {
+                    null
                 }
+                Log.i(TAG, "load(): vision=${currentVisionModelId ?: "default"}, " +
+                    "processor=${imageProcessor?.javaClass?.simpleName ?: "off"}")
                 Log.i(TAG, "load(): SUCCESS, handle=0x${h.toString(16)}")
                 BackendResult.Ok(Unit)
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "load(): loadModelHandleByNameNative threw", t)
+            Log.e(TAG, "load(): native load threw", t)
             BackendResult.Err(QuickAiError.MODEL_LOAD_FAILED, t.message)
+        }
+    }
+
+    private fun buildMultimodalCompositionJson(req: LoadModelRequest): String {
+        val compositionId = requireCompositionField("composition_id", req.compositionId)
+        val llmModelId = requireCompositionField("llm_model_id", req.llmModelId)
+        val visionModelId = requireCompositionField("vision_model_id", req.visionModelId)
+        val connectorModelId = requireCompositionField("connector_model_id", req.connectorModelId)
+        val llmBackend = requireCompositionBackend("llm_backend", req.llmBackend)
+        val visionBackend = requireCompositionBackend("vision_backend", req.visionBackend)
+        val connectorBackend = requireCompositionBackend("connector_backend", req.connectorBackend)
+
+        return buildJsonObject {
+            put("id", compositionId)
+            put("llm", buildJsonObject {
+                put("model_id", llmModelId)
+                put("backend", llmBackend.name)
+            })
+            put("vision", buildJsonObject {
+                put("model_id", visionModelId)
+                put("backend", visionBackend.name)
+            })
+            put("connector", buildJsonObject {
+                put("model_id", connectorModelId)
+                put("backend", connectorBackend.name)
+            })
+        }.toString()
+    }
+
+    private fun requireCompositionField(name: String, value: String?): String =
+        value?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("composition load missing $name")
+
+    private fun requireCompositionBackend(name: String, value: BackendType?): BackendType =
+        value ?: throw IllegalArgumentException("composition load missing $name")
+
+    private fun processorForVisionModel(visionModelId: String): NativeImageProcessor =
+        when (visionModelId) {
+            "siglip-lfm2-vision" -> SigLipNaFlexImageProcessor()
+            "jepa-qnn-vision", ModelIds.VJEPA_QNN -> JepaImageProcessor()
+            else -> LlavaNextNativeImageProcessor(appContext)
+        }
+
+    private class LlavaNextNativeImageProcessor(
+        context: Context
+    ) : NativeImageProcessor {
+        private val delegate = LlavaNextImageProcessor(context)
+
+        override fun preprocessNative(image: android.graphics.Bitmap): NativeCausalLm.MultimodalInput {
+            val modelInput = delegate.preprocess(image)
+            val cropSize = delegate.getCropSize()
+            return NativeCausalLm.MultimodalInput(
+                pixelValues = modelInput.pixelValues,
+                numPatches = modelInput.pixelValues.size / (cropSize * cropSize * 3),
+                originalHeight = modelInput.originalSize.first,
+                originalWidth = modelInput.originalSize.second
+            )
         }
     }
 
@@ -724,7 +803,7 @@ class NativeQuickDotAI(
      * @brief Prepare multimodal input from PromptPart list.
      *
      * Extracts images from parts and preprocesses them using
-     * LlavaNextImageProcessor. Supports both single-image and
+     * the selected native image processor. Supports both single-image and
      * multi-image (V-JEPA) scenarios:
      * - Single image: returns a MultimodalInput with numImages=1 (default)
      * - Multiple ImageBytes: preprocesses each image, concatenates pixel
@@ -735,7 +814,7 @@ class NativeQuickDotAI(
      */
     private fun prepareMultimodalInput(
         parts: List<PromptPart>,
-        processor: LlavaNextImageProcessor
+        processor: NativeImageProcessor
     ): NativeCausalLm.MultimodalInput? {
         // Collect all image parts first
         val imageParts = mutableListOf<PromptPart>()
@@ -773,8 +852,6 @@ class NativeQuickDotAI(
         val heightsList = mutableListOf<Int>()
         val widthsList = mutableListOf<Int>()
         var totalPatches = 0
-        val cropSize = processor.getCropSize()
-        val patchSize = cropSize * cropSize * 3
 
         for (imgPart in imageParts) {
             val bitmap = when (imgPart) {
@@ -799,12 +876,12 @@ class NativeQuickDotAI(
                 Log.w(TAG, "Failed to decode image in multi-image batch")
                 continue
             }
-            val modelInput = processor.preprocess(bitmap)
-            val numPatches = modelInput.pixelValues.size / patchSize
+            val modelInput = processor.preprocessNative(bitmap)
+            val numPatches = modelInput.numPatches
             allPixelValues.addAll(modelInput.pixelValues.toList())
             patchesPerImageList.add(numPatches)
-            heightsList.add(modelInput.originalSize.first)
-            widthsList.add(modelInput.originalSize.second)
+            heightsList.add(modelInput.originalHeight)
+            widthsList.add(modelInput.originalWidth)
             totalPatches += numPatches
         }
 
@@ -831,7 +908,7 @@ class NativeQuickDotAI(
      */
     private fun preprocessSingleImage(
         part: PromptPart,
-        processor: LlavaNextImageProcessor
+        processor: NativeImageProcessor
     ): NativeCausalLm.MultimodalInput? {
         when (part) {
             is PromptPart.ImageFile -> {
@@ -845,13 +922,7 @@ class NativeQuickDotAI(
                     Log.w(TAG, "Failed to decode image: ${part.absolutePath}")
                     return null
                 }
-                val modelInput = processor.preprocess(bitmap)
-                return NativeCausalLm.MultimodalInput(
-                    pixelValues = modelInput.pixelValues,
-                    numPatches = modelInput.pixelValues.size / (processor.getCropSize() * processor.getCropSize() * 3),
-                    originalHeight = modelInput.originalSize.first,
-                    originalWidth = modelInput.originalSize.second
-                )
+                return processor.preprocessNative(bitmap)
             }
             is PromptPart.ImageBytes -> {
                 if (part.bytes.isEmpty()) {
@@ -863,13 +934,7 @@ class NativeQuickDotAI(
                     Log.w(TAG, "Failed to decode image from bytes")
                     return null
                 }
-                val modelInput = processor.preprocess(bitmap)
-                return NativeCausalLm.MultimodalInput(
-                    pixelValues = modelInput.pixelValues,
-                    numPatches = modelInput.pixelValues.size / (processor.getCropSize() * processor.getCropSize() * 3),
-                    originalHeight = modelInput.originalSize.first,
-                    originalWidth = modelInput.originalSize.second
-                )
+                return processor.preprocessNative(bitmap)
             }
             else -> return null
         }

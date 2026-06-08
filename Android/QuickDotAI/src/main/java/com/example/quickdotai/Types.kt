@@ -81,9 +81,9 @@ enum class QuickAiError(val code: Int) {
  * discovers its model assets through the native C API's internal
  * model-directory resolution).
  *
- * [visionBackend] and [cacheDir] are optional knobs used only by
- * multimodal-capable engines ([LiteRTLm] today). They are ignored
- * by [NativeQuickDotAI].
+ * [compositionId] and the component fields are honored by [NativeQuickDotAI]
+ * for descriptor-driven multimodal composition loads. [visionBackend] also
+ * remains the legacy LiteRT-LM multimodal enable knob.
  */
 @Serializable
 data class LoadModelRequest(
@@ -93,15 +93,38 @@ data class LoadModelRequest(
     @SerialName("model_path") val modelPath: String? = null,
 
     /**
+     * Optional native multimodal composition id. When set, [NativeQuickDotAI]
+     * ignores the legacy single-model [backend] loader and sends a JSON
+     * composition request to the C API. [modelId] should still carry the same
+     * id for compatibility with existing callers and catalog lookup.
+     */
+    @SerialName("composition_id") val compositionId: String? = null,
+
+    /** Text LLM component used by [compositionId]. */
+    @SerialName("llm_model_id") val llmModelId: String? = null,
+
+    /** Backend for [llmModelId]. */
+    @SerialName("llm_backend") val llmBackend: BackendType? = null,
+
+    /** Vision encoder component used by [compositionId]. */
+    @SerialName("vision_model_id") val visionModelId: String? = null,
+
+    /**
      * Compute backend for the model's vision encoder when loading a
      * multimodal-capable model (e.g. Gemma-4 / Gemma3n). Null means
      * the engine is loaded in text-only mode — in that case
      * [QuickDotAI.runMultimodal] returns [QuickAiError.UNSUPPORTED]
      * even on backends that would otherwise support images.
      *
-     * Only honored by [LiteRTLm]; [NativeQuickDotAI] ignores it.
+     * Honored by [LiteRTLm] and by [NativeQuickDotAI] composition loads.
      */
     @SerialName("vision_backend") val visionBackend: BackendType? = null,
+
+    /** Connector component used by [compositionId]. */
+    @SerialName("connector_model_id") val connectorModelId: String? = null,
+
+    /** Backend for [connectorModelId]. */
+    @SerialName("connector_backend") val connectorBackend: BackendType? = null,
 
     /**
      * Writable directory for engine on-disk caches. Populating this
@@ -159,9 +182,15 @@ data class LoadModelRequest(
 ) {
     /**
      * Canonical key shared across the stack: one worker/handle per
-     * (model, quantization) pair.
+     * single-model or composition/component/backend/quantization tuple.
      */
-    val modelKey: String get() = "$modelId:${quantization.name}"
+    val modelKey: String get() =
+        if (compositionId != null) {
+            listOf(compositionId, llmModelId, llmBackend, visionModelId, visionBackend, connectorModelId, connectorBackend, quantization.name)
+                .joinToString(":") { it?.toString() ?: "-" }
+        } else {
+            "$modelId:${quantization.name}"
+        }
 }
 
 /**

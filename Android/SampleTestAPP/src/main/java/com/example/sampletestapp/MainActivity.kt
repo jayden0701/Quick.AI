@@ -71,6 +71,7 @@ import com.example.quickdotai.LoadModelRequest
 import com.example.quickdotai.ModelCatalog
 import com.example.quickdotai.ModelDescriptor
 import com.example.quickdotai.ModelIds
+import com.example.quickdotai.ModelRole
 import com.example.quickdotai.NativeQuickDotAI
 import com.example.quickdotai.RuntimeKind
 import com.example.quickdotai.createEngine
@@ -198,14 +199,35 @@ class MainActivity : AppCompatActivity() {
     private var selBackend: BackendType = BackendType.NPU
     private val selDescriptor: ModelDescriptor?
         get() = ModelCatalog.resolve(selFamily, selRuntime, selBackend)
+    private val activeDescriptor: ModelDescriptor?
+        get() = selCompositionId?.let { ModelCatalog.byId(it) } ?: selDescriptor
     private var selectedQuant: QuantizationType = QuantizationType.W4A32
+
+    private val noCompositionLabel = "Single model"
+    private var selCompositionId: String? = null
+    private var selLlmModelId: String? = null
+    private var selLlmBackend: BackendType = BackendType.CPU
+    private var selVisionModelId: String? = null
+    private var selVisionBackend: BackendType = BackendType.CPU
+    private var selConnectorModelId: String? = null
+    private var selConnectorBackend: BackendType = BackendType.CPU
 
     private var chatSelFamily: String = ModelIds.GEMMA4
     private var chatSelRuntime: RuntimeKind = RuntimeKind.NATIVE
     private var chatSelBackend: BackendType = BackendType.NPU
     private val chatSelDescriptor: ModelDescriptor?
         get() = ModelCatalog.resolve(chatSelFamily, chatSelRuntime, chatSelBackend)
+    private val chatActiveDescriptor: ModelDescriptor?
+        get() = chatCompositionId?.let { ModelCatalog.byId(it) } ?: chatSelDescriptor
     private var chatSelectedQuant: QuantizationType = QuantizationType.W4A32
+
+    private var chatCompositionId: String? = null
+    private var chatLlmModelId: String? = null
+    private var chatLlmBackend: BackendType = BackendType.CPU
+    private var chatVisionModelId: String? = null
+    private var chatVisionBackend: BackendType = BackendType.CPU
+    private var chatConnectorModelId: String? = null
+    private var chatConnectorBackend: BackendType = BackendType.CPU
 
     private var modelBasePathText: String = "/sdcard/Download/aistudio-mobile/models/"
     private var modelPathText: String = ""
@@ -541,7 +563,7 @@ class MainActivity : AppCompatActivity() {
         val subtitle = if (loadStatus == "loaded")
             "$loadedLabel  ·  ${selBackend.name}"
         else
-            "${selDescriptor?.displayName ?: selFamily}  ·  ${selRuntime.name}  ·  ${selBackend.name}"
+            "${activeDescriptor?.displayName ?: selFamily}  ·  ${selRuntime.name}  ·  ${selBackend.name}"
         val statusDotColor = when (loadStatus) {
             "loaded"  -> t.success
             "loading" -> t.primary
@@ -594,6 +616,8 @@ class MainActivity : AppCompatActivity() {
             })
             spacer(body, 12)
 
+            addMainCompositionControls(body, t)
+
             // MODEL BASE PATH — editable root directory for model files.
             body.addView(labelView(t, "MODEL BASE PATH"))
             modelBasePathField = roundedEditText(t, modelBasePathText, mono = true,
@@ -603,7 +627,7 @@ class MainActivity : AppCompatActivity() {
 
             // MODEL NAME — read-only display of default folder name + error if missing.
             body.addView(labelView(t, "MODEL NAME"))
-            body.addView(modelNameView(t, selDescriptor))
+            body.addView(modelNameView(t, activeDescriptor))
             spacer(body, 12)
 
             // Load / Unload action row.
@@ -641,7 +665,7 @@ class MainActivity : AppCompatActivity() {
         imgLabelRow.addView(labelView(t, "IMAGE INPUT").also {
             it.layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
         })
-        if (selDescriptor?.let { isMultimodal(it) } != true) {
+        if (activeDescriptor?.let { isMultimodal(it) } != true) {
             spacerH(imgLabelRow, 6)
             val badge = TextView(this).apply {
                 text = "GEMMA4 only"
@@ -709,7 +733,7 @@ class MainActivity : AppCompatActivity() {
             // touched by onClearImageClicked / readImageBytesAsync.
             imageStatusView = TextView(this).apply { visibility = View.GONE }
         } else {
-            val pickLabel = if (isMultiImageModel(selDescriptor))
+            val pickLabel = if (isMultiImageModel(activeDescriptor))
                 "+  Pick images for V-JEPA" else "+  Pick image for multimodal run"
             val dropzone = TextView(this).apply {
                 text = pickLabel
@@ -767,7 +791,7 @@ class MainActivity : AppCompatActivity() {
         modelHeaderRow.addView(modelIcon)
         spacerH(modelHeaderRow, 12)
         modelHeaderRow.addView(TextView(this).apply {
-            text = chatSelDescriptor?.let { badgeLabel(it) } ?: chatSelFamily
+            text = chatActiveDescriptor?.let { badgeLabel(it) } ?: chatSelFamily
             setTextColor(t.onSurface)
             textSize = 13f
             typeface = Typeface.MONOSPACE
@@ -820,6 +844,8 @@ class MainActivity : AppCompatActivity() {
         })
         spacer(modelCard, 12)
 
+        addChatCompositionControls(modelCard, t)
+
         // MODEL BASE PATH — editable root directory for model files.
         modelCard.addView(labelView(t, "MODEL BASE PATH"))
         chatModelBasePathField = roundedEditText(t, modelBasePathText, mono = true,
@@ -829,12 +855,12 @@ class MainActivity : AppCompatActivity() {
 
         // MODEL NAME — read-only display of default folder name + error if missing.
         modelCard.addView(labelView(t, "MODEL NAME"))
-        modelCard.addView(modelNameView(t, chatSelDescriptor))
+        modelCard.addView(modelNameView(t, chatActiveDescriptor))
         container.addView(modelCard)
         spacer(container, 10)
 
         val chatImageCard = roundedCard(t, t.surfaceContainer)
-        val imgSubtitle = if (isMultiImageModel(chatSelDescriptor))
+        val imgSubtitle = if (isMultiImageModel(chatActiveDescriptor))
             "Select multiple images for V-JEPA" else "Attach one image to the next chat message"
         chatImageCard.addView(sectionHeader(t, "[ ]", t.secondaryContainer, t.onSurface,
             "Image input", imgSubtitle))
@@ -847,7 +873,7 @@ class MainActivity : AppCompatActivity() {
         chatImgLabelRow.addView(labelView(t, "IMAGE INPUT").also {
             it.layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
         })
-        if (chatSelDescriptor?.let { isMultimodal(it) } != true) {
+        if (chatActiveDescriptor?.let { isMultimodal(it) } != true) {
             spacerH(chatImgLabelRow, 6)
             val badge = TextView(this).apply {
                 text = "Vision model only"
@@ -913,7 +939,7 @@ class MainActivity : AppCompatActivity() {
             chatImageCard.addView(attached)
             imageStatusView = TextView(this).apply { visibility = View.GONE }
         } else {
-            val pickLabel = if (isMultiImageModel(chatSelDescriptor))
+            val pickLabel = if (isMultiImageModel(chatActiveDescriptor))
                 "+  Pick images for V-JEPA" else "+  Pick image for multimodal chat"
             val dropzone = TextView(this).apply {
                 text = pickLabel
@@ -1116,7 +1142,7 @@ class MainActivity : AppCompatActivity() {
         imageLabelRow.addView(labelView(t, "IMAGE INPUT").also {
             it.layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
         })
-        if (selDescriptor?.let { isMultimodal(it) } != true) {
+        if (activeDescriptor?.let { isMultimodal(it) } != true) {
             spacerH(imageLabelRow, 6)
             imageLabelRow.addView(TextView(this).apply {
                 text = "Vision model only"
@@ -1179,7 +1205,7 @@ class MainActivity : AppCompatActivity() {
             openAiImageCard.addView(attached)
             imageStatusView = TextView(this).apply { visibility = View.GONE }
         } else {
-            val pickLabel = if (isMultiImageModel(selDescriptor))
+            val pickLabel = if (isMultiImageModel(activeDescriptor))
                 "+  Pick images for V-JEPA" else "+  Pick image for OpenAI multimodal"
             openAiImageCard.addView(TextView(this).apply {
                 text = pickLabel
@@ -1970,11 +1996,235 @@ class MainActivity : AppCompatActivity() {
         else -> "[TEXT]        ${d.displayName}"
     }
 
-    private fun isMultimodal(d: ModelDescriptor) = Capability.MULTIMODAL in d.capabilities
+    private fun isMultimodal(d: ModelDescriptor) =
+        Capability.MULTIMODAL in d.capabilities ||
+            Capability.VISION_ENCODER in d.capabilities ||
+            d.role == ModelRole.COMPOSITION
     private fun usesMessagesApi(d: ModelDescriptor) = Capability.MESSAGES_API in d.capabilities
 
     private fun visionBackendFor(d: ModelDescriptor, backend: BackendType): BackendType? =
         if (isMultimodal(d)) backend else null
+
+    private fun orderedBackends(d: ModelDescriptor?): List<BackendType> =
+        listOf(BackendType.CPU, BackendType.GPU, BackendType.NPU)
+            .filter { d != null && it in d.backends }
+
+    private fun compositionOptions(): List<String> =
+        listOf(noCompositionLabel) + ModelCatalog.compositions().map { it.id }
+
+    private fun syncMainCompositionSelection() {
+        val compositionId = selCompositionId ?: return
+        val llmOptions = ModelCatalog.llmOptionsForComposition(compositionId)
+        if (selLlmModelId !in llmOptions.map { it.id }) {
+            selLlmModelId = llmOptions.firstOrNull()?.id
+        }
+        val llm = selLlmModelId
+        val visionOptions = if (llm != null) {
+            ModelCatalog.visionOptionsForLlm(llm)
+                .filter { compositionId in it.compatibleWith }
+        } else {
+            emptyList()
+        }
+        if (selVisionModelId !in visionOptions.map { it.id }) {
+            selVisionModelId = visionOptions.firstOrNull()?.id
+        }
+
+        val llmDescriptor = selLlmModelId?.let { ModelCatalog.byId(it) }
+        val visionDescriptor = selVisionModelId?.let { ModelCatalog.byId(it) }
+        selLlmBackend = orderedBackends(llmDescriptor).firstOrNull { it == selLlmBackend }
+            ?: orderedBackends(llmDescriptor).firstOrNull()
+            ?: BackendType.CPU
+        selVisionBackend = orderedBackends(visionDescriptor).firstOrNull { it == selVisionBackend }
+            ?: orderedBackends(visionDescriptor).firstOrNull()
+            ?: BackendType.CPU
+
+        val connector = if (selLlmModelId != null && selVisionModelId != null) {
+            ModelCatalog.connectorFor(selLlmModelId!!, selVisionModelId!!)
+        } else {
+            null
+        }
+        selConnectorModelId = connector?.id
+        selConnectorBackend = orderedBackends(connector).firstOrNull { it == selConnectorBackend }
+            ?: orderedBackends(connector).firstOrNull()
+            ?: BackendType.CPU
+    }
+
+    private fun syncChatCompositionSelection() {
+        val compositionId = chatCompositionId ?: return
+        val llmOptions = ModelCatalog.llmOptionsForComposition(compositionId)
+        if (chatLlmModelId !in llmOptions.map { it.id }) {
+            chatLlmModelId = llmOptions.firstOrNull()?.id
+        }
+        val llm = chatLlmModelId
+        val visionOptions = if (llm != null) {
+            ModelCatalog.visionOptionsForLlm(llm)
+                .filter { compositionId in it.compatibleWith }
+        } else {
+            emptyList()
+        }
+        if (chatVisionModelId !in visionOptions.map { it.id }) {
+            chatVisionModelId = visionOptions.firstOrNull()?.id
+        }
+
+        val llmDescriptor = chatLlmModelId?.let { ModelCatalog.byId(it) }
+        val visionDescriptor = chatVisionModelId?.let { ModelCatalog.byId(it) }
+        chatLlmBackend = orderedBackends(llmDescriptor).firstOrNull { it == chatLlmBackend }
+            ?: orderedBackends(llmDescriptor).firstOrNull()
+            ?: BackendType.CPU
+        chatVisionBackend = orderedBackends(visionDescriptor).firstOrNull { it == chatVisionBackend }
+            ?: orderedBackends(visionDescriptor).firstOrNull()
+            ?: BackendType.CPU
+
+        val connector = if (chatLlmModelId != null && chatVisionModelId != null) {
+            ModelCatalog.connectorFor(chatLlmModelId!!, chatVisionModelId!!)
+        } else {
+            null
+        }
+        chatConnectorModelId = connector?.id
+        chatConnectorBackend = orderedBackends(connector).firstOrNull { it == chatConnectorBackend }
+            ?: orderedBackends(connector).firstOrNull()
+            ?: BackendType.CPU
+    }
+
+    private fun componentValueView(t: M3Tokens, value: String): View =
+        TextView(this).apply {
+            text = value
+            setTextColor(t.onSurface)
+            textSize = 13f
+            typeface = Typeface.MONOSPACE
+            background = strokedSolid(t.surfaceContainer, 8, t.outline, 1)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        }
+
+    private fun addMainCompositionControls(body: LinearLayout, t: M3Tokens) {
+        val options = compositionOptions()
+        if (options.size <= 1) return
+
+        body.addView(labelView(t, "COMPOSITION"))
+        body.addView(dropdownField(t, options, selCompositionId ?: noCompositionLabel) { picked ->
+            selCompositionId = picked.takeUnless { it == noCompositionLabel }
+            if (selCompositionId == null) {
+                selLlmModelId = null
+                selVisionModelId = null
+                selConnectorModelId = null
+            } else {
+                syncMainCompositionSelection()
+            }
+            rebuildUi(resetModelPath = true)
+        })
+        spacer(body, 12)
+
+        val compositionId = selCompositionId ?: return
+        syncMainCompositionSelection()
+        val llmOptions = ModelCatalog.llmOptionsForComposition(compositionId)
+        val visionOptions = selLlmModelId?.let {
+            ModelCatalog.visionOptionsForLlm(it).filter { d -> compositionId in d.compatibleWith }
+        } ?: emptyList()
+
+        body.addView(labelView(t, "LLM COMPONENT"))
+        body.addView(dropdownField(t, llmOptions.map { it.id }, selLlmModelId ?: "") { picked ->
+            selLlmModelId = picked
+            syncMainCompositionSelection()
+            rebuildUi(resetModelPath = true)
+        })
+        spacer(body, 10)
+
+        val llmBackendOptions = orderedBackends(selLlmModelId?.let { ModelCatalog.byId(it) })
+        body.addView(labelView(t, "LLM BACKEND"))
+        body.addView(chipRow(t, llmBackendOptions.map { it.name }, selLlmBackend.name) { picked ->
+            selLlmBackend = BackendType.valueOf(picked)
+            rebuildUi(resetModelPath = true)
+        })
+        spacer(body, 10)
+
+        body.addView(labelView(t, "VISION ENCODER"))
+        body.addView(dropdownField(t, visionOptions.map { it.id }, selVisionModelId ?: "") { picked ->
+            selVisionModelId = picked
+            syncMainCompositionSelection()
+            rebuildUi(resetModelPath = true)
+        })
+        spacer(body, 10)
+
+        val visionBackendOptions = orderedBackends(selVisionModelId?.let { ModelCatalog.byId(it) })
+        body.addView(labelView(t, "VISION BACKEND"))
+        body.addView(chipRow(t, visionBackendOptions.map { it.name }, selVisionBackend.name) { picked ->
+            selVisionBackend = BackendType.valueOf(picked)
+            rebuildUi(resetModelPath = true)
+        })
+        spacer(body, 10)
+
+        body.addView(labelView(t, "CONNECTOR"))
+        body.addView(componentValueView(t, selConnectorModelId ?: "No compatible connector"))
+        spacer(body, 12)
+    }
+
+    private fun addChatCompositionControls(body: LinearLayout, t: M3Tokens) {
+        val options = compositionOptions()
+        if (options.size <= 1) return
+
+        body.addView(labelView(t, "COMPOSITION"))
+        body.addView(dropdownField(t, options, chatCompositionId ?: noCompositionLabel) { picked ->
+            chatCompositionId = picked.takeUnless { it == noCompositionLabel }
+            if (chatCompositionId == null) {
+                chatLlmModelId = null
+                chatVisionModelId = null
+                chatConnectorModelId = null
+            } else {
+                syncChatCompositionSelection()
+            }
+            clearChatSessionState()
+            rebuildUi()
+        })
+        spacer(body, 12)
+
+        val compositionId = chatCompositionId ?: return
+        syncChatCompositionSelection()
+        val llmOptions = ModelCatalog.llmOptionsForComposition(compositionId)
+        val visionOptions = chatLlmModelId?.let {
+            ModelCatalog.visionOptionsForLlm(it).filter { d -> compositionId in d.compatibleWith }
+        } ?: emptyList()
+
+        body.addView(labelView(t, "LLM COMPONENT"))
+        body.addView(dropdownField(t, llmOptions.map { it.id }, chatLlmModelId ?: "") { picked ->
+            chatLlmModelId = picked
+            syncChatCompositionSelection()
+            clearChatSessionState()
+            rebuildUi()
+        })
+        spacer(body, 10)
+
+        val llmBackendOptions = orderedBackends(chatLlmModelId?.let { ModelCatalog.byId(it) })
+        body.addView(labelView(t, "LLM BACKEND"))
+        body.addView(chipRow(t, llmBackendOptions.map { it.name }, chatLlmBackend.name) { picked ->
+            chatLlmBackend = BackendType.valueOf(picked)
+            clearChatSessionState()
+            rebuildUi()
+        })
+        spacer(body, 10)
+
+        body.addView(labelView(t, "VISION ENCODER"))
+        body.addView(dropdownField(t, visionOptions.map { it.id }, chatVisionModelId ?: "") { picked ->
+            chatVisionModelId = picked
+            syncChatCompositionSelection()
+            clearChatSessionState()
+            rebuildUi()
+        })
+        spacer(body, 10)
+
+        val visionBackendOptions = orderedBackends(chatVisionModelId?.let { ModelCatalog.byId(it) })
+        body.addView(labelView(t, "VISION BACKEND"))
+        body.addView(chipRow(t, visionBackendOptions.map { it.name }, chatVisionBackend.name) { picked ->
+            chatVisionBackend = BackendType.valueOf(picked)
+            clearChatSessionState()
+            rebuildUi()
+        })
+        spacer(body, 10)
+
+        body.addView(labelView(t, "CONNECTOR"))
+        body.addView(componentValueView(t, chatConnectorModelId ?: "No compatible connector"))
+        spacer(body, 12)
+    }
 
     /* ════════════════════════════════════════════════════════════════
      * Engine handlers (logic preserved from the original sample)
@@ -2022,6 +2272,9 @@ class MainActivity : AppCompatActivity() {
      * be called on the main thread.
      */
     private fun buildLoadRequest(): LoadModelRequest {
+        if (selCompositionId != null) {
+            syncMainCompositionSelection()
+        }
         val d = selDescriptor
         val backend = selBackend
         val quant = selectedQuant
@@ -2029,6 +2282,23 @@ class MainActivity : AppCompatActivity() {
         val nativeLibDir = applicationContext.applicationInfo.nativeLibraryDir
         val basePath = (if (::modelBasePathField.isInitialized) modelBasePathField.text.toString()
                         else modelBasePathText).trim().ifEmpty { modelBasePathText }
+        if (selCompositionId != null) {
+            return LoadModelRequest(
+                backend = selLlmBackend,
+                modelId = selCompositionId ?: (d?.id ?: selFamily),
+                quantization = quant,
+                modelPath = modelPath,
+                compositionId = selCompositionId,
+                llmModelId = selLlmModelId,
+                llmBackend = selLlmBackend,
+                visionModelId = selVisionModelId,
+                visionBackend = selVisionBackend,
+                connectorModelId = selConnectorModelId,
+                connectorBackend = selConnectorBackend,
+                nativeLibDir = nativeLibDir,
+                modelBasePath = basePath,
+            )
+        }
         return LoadModelRequest(
             backend = backend,
             modelId = d?.id ?: selFamily,
@@ -2041,6 +2311,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildChatLoadRequest(): LoadModelRequest {
+        if (chatCompositionId != null) {
+            syncChatCompositionSelection()
+        }
         val d = chatSelDescriptor
         val backend = chatSelBackend
         val quant = chatSelectedQuant
@@ -2048,6 +2321,23 @@ class MainActivity : AppCompatActivity() {
         val nativeLibDir = applicationContext.applicationInfo.nativeLibraryDir
         val basePath = (if (::chatModelBasePathField.isInitialized) chatModelBasePathField.text.toString()
                         else modelBasePathText).trim().ifEmpty { modelBasePathText }
+        if (chatCompositionId != null) {
+            return LoadModelRequest(
+                backend = chatLlmBackend,
+                modelId = chatCompositionId ?: (d?.id ?: chatSelFamily),
+                quantization = quant,
+                modelPath = modelPath,
+                compositionId = chatCompositionId,
+                llmModelId = chatLlmModelId,
+                llmBackend = chatLlmBackend,
+                visionModelId = chatVisionModelId,
+                visionBackend = chatVisionBackend,
+                connectorModelId = chatConnectorModelId,
+                connectorBackend = chatConnectorBackend,
+                nativeLibDir = nativeLibDir,
+                modelBasePath = basePath,
+            )
+        }
         return LoadModelRequest(
             backend = backend,
             modelId = d?.id ?: chatSelFamily,
@@ -2280,7 +2570,7 @@ class MainActivity : AppCompatActivity() {
         val prompt = normalizeVisionPromptText(chatPromptField.text.toString())
         if (prompt.isBlank()) { setStatus("Chat message is empty."); return }
         val imgBytesList = selectedImageBytesList.toList()
-        if (imgBytesList.isNotEmpty() && chatSelDescriptor?.let { isMultimodal(it) } != true) {
+        if (imgBytesList.isNotEmpty() && chatActiveDescriptor?.let { isMultimodal(it) } != true) {
             setStatus("Selected chat model does not support image input.")
             return
         }
@@ -2377,7 +2667,7 @@ class MainActivity : AppCompatActivity() {
         val prompt = normalizeVisionPromptText(chatPromptField.text.toString())
         if (prompt.isBlank()) { setStatus("Chat message is empty."); return }
         val imgBytes = selectedImageBytes
-        if (imgBytes != null && chatSelDescriptor?.let { isMultimodal(it) } != true) {
+        if (imgBytes != null && chatActiveDescriptor?.let { isMultimodal(it) } != true) {
             setStatus("Selected chat model does not support image input.")
             return
         }
@@ -2526,7 +2816,7 @@ class MainActivity : AppCompatActivity() {
         val jsonText = openAIMessagesField.text.toString().trim()
         if (jsonText.isBlank()) { setStatus("Messages JSON is empty."); return }
         val imgBytesList = selectedImageBytesList.toList()
-        if (imgBytesList.isNotEmpty() && selDescriptor?.let { isMultimodal(it) } != true) {
+        if (imgBytesList.isNotEmpty() && activeDescriptor?.let { isMultimodal(it) } != true) {
             setStatus("Selected model does not support OpenAI image input.")
             return
         }
@@ -2598,7 +2888,7 @@ class MainActivity : AppCompatActivity() {
                             mainHandler.post { rebuildUi() }
                         }
                     }
-                } else if (selDescriptor?.let { usesMessagesApi(it) } == true) {
+                } else if (activeDescriptor?.let { usesMessagesApi(it) } == true) {
                     val messages = parseOpenAIMessages(jsonText)
                     if (messages == null) {
                         streaming = false
@@ -2675,13 +2965,19 @@ class MainActivity : AppCompatActivity() {
 
     /** Whether the currently selected model supports multi-image (V-JEPA). */
     private fun isMultiImageModel(d: ModelDescriptor?): Boolean =
-        d != null && Capability.MULTI_IMAGE in d.capabilities
+        d != null && (
+            Capability.MULTI_IMAGE in d.capabilities ||
+                (d.role == ModelRole.COMPOSITION &&
+                    d.compatibleWith.any {
+                        Capability.MULTI_IMAGE in (ModelCatalog.byId(it)?.capabilities ?: emptySet())
+                    })
+            )
 
     /* ───── Image picker handlers ───── */
 
     private fun onPickImageClicked() {
         // Use multi-image picker for V-JEPA models, single for others
-        if (isMultiImageModel(selDescriptor) || isMultiImageModel(chatSelDescriptor)) {
+        if (isMultiImageModel(activeDescriptor) || isMultiImageModel(chatActiveDescriptor)) {
             multiImagePickerLauncher.launch(
                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
             )
