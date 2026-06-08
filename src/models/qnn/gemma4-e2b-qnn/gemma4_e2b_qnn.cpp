@@ -183,7 +183,7 @@ struct PleSf4CacheHeader {
 #pragma pack(pop)
 
 inline int64_t ple_file_mtime_(const std::string &p) {
-  struct stat st {};
+  struct stat st{};
   return (::stat(p.c_str(), &st) == 0) ? static_cast<int64_t>(st.st_mtime) : -1;
 }
 
@@ -704,7 +704,7 @@ void Gemma4_E2B_QNN::initialize() {
                   .dimensions.back();
 
   // ── Debug: confirm prefill and generation share the same pos/swa dims ──
-  {
+  if (debug_qnn_io_) {
     const int gen_pos = GraphParser::get_tensor_info_or_throw(
                           generation_graph_info.raw_inputs, "position_ids_cos")
                           .dimensions.back();
@@ -839,16 +839,18 @@ void Gemma4_E2B_QNN::initialize() {
                     generation_per_layer_offset_,
                     generation_per_layer_model_index_);
 
-  std::cout << "[PLE] prefill slots=" << prefill_per_layer_dst_.size()
-            << " generation slots=" << generation_per_layer_dst_.size()
-            << std::endl;
-  std::cout << "[PLE] prefill model indices: ";
-  for (int n : prefill_per_layer_model_index_)
-    std::cout << n << " ";
-  std::cout << "\n[PLE] generation model indices: ";
-  for (int n : generation_per_layer_model_index_)
-    std::cout << n << " ";
-  std::cout << std::endl;
+  if (debug_qnn_io_) {
+    std::cout << "[PLE] prefill slots=" << prefill_per_layer_dst_.size()
+              << " generation slots=" << generation_per_layer_dst_.size()
+              << std::endl;
+    std::cout << "[PLE] prefill model indices: ";
+    for (int n : prefill_per_layer_model_index_)
+      std::cout << n << " ";
+    std::cout << "\n[PLE] generation model indices: ";
+    for (int n : generation_per_layer_model_index_)
+      std::cout << n << " ";
+    std::cout << std::endl;
+  }
 
   open_ple_file_();
 
@@ -878,8 +880,11 @@ void Gemma4_E2B_QNN::initialize() {
     kv_layer_count++;
   }
 
-  std::cout << "[KV-DBG] kv_layer_count=" << kv_layer_count
-            << " (num_hidden_layers=" << num_hidden_layers << ")" << std::endl;
+  if (debug_qnn_io_) {
+    std::cout << "[KV-DBG] kv_layer_count=" << kv_layer_count
+              << " (num_hidden_layers=" << num_hidden_layers << ")"
+              << std::endl;
+  }
 
   LOGD("KV layer count = %d (num_hidden_layers config = %d)", kv_layer_count,
        num_hidden_layers);
@@ -896,7 +901,7 @@ void Gemma4_E2B_QNN::initialize() {
       this->kv_columns.push_back(gen_key_info.dimensions[2]);
 
       // ── Debug: dump KV tensor shape for first 6 + last layer ──
-      if (layer < 6 || layer + 1 == kv_layer_count) {
+      if (debug_qnn_io_ && (layer < 6 || layer + 1 == kv_layer_count)) {
         std::cout << "[KV-DBG] layer " << layer << " key dims=[";
         for (size_t i = 0; i < gen_key_info.dimensions.size(); ++i) {
           if (i)
@@ -997,87 +1002,93 @@ void Gemma4_E2B_QNN::initialize() {
        this->generation_output_kv_bindings.size(),
        generation_logits_output_index);
 
-  // ── Debug: dump prefill/gen output KV bindings (layer indices) ──
-  std::cout << "[KV-OUT-DBG] prefill output KV layers (key only): ";
-  for (const auto &b : prefill_output_kv_bindings)
-    if (b.is_key)
-      std::cout << b.layer_index << " ";
-  std::cout << "\n[KV-OUT-DBG] generation output KV layers (key only): ";
-  for (const auto &b : generation_output_kv_bindings)
-    if (b.is_key)
-      std::cout << b.layer_index << " ";
-  std::cout << "\n[KV-OUT-DBG] prefill bindings count="
-            << prefill_output_kv_bindings.size()
-            << " generation bindings count="
-            << generation_output_kv_bindings.size() << std::endl;
-  // ── Debug: dump prefill OUTPUT past_key shapes (sliding & full layers) ──
-  // Confirms whether the output is per-chunk [head_dim, 256] or full
-  // updated cache [head_dim, 7936+] or something else. The append code
-  // assumes per-chunk with src_row_length=context_size=256.
-  std::cout << "[KV-OUT-SHAPE-DBG] prefill output K shapes: ";
-  for (const auto &b : prefill_output_kv_bindings) {
-    if (!b.is_key)
-      continue;
-    if (b.layer_index > 5 && b.layer_index != 14)
-      continue;
-    const auto &info = prefill_graph_info.raw_outputs[b.output_index];
-    std::cout << "L" << b.layer_index << "=[";
-    for (size_t i = 0; i < info.dimensions.size(); ++i) {
-      if (i)
-        std::cout << ",";
-      std::cout << info.dimensions[i];
+  if (debug_qnn_io_) {
+    // ── Debug: dump prefill/gen output KV bindings (layer indices) ──
+    std::cout << "[KV-OUT-DBG] prefill output KV layers (key only): ";
+    for (const auto &b : prefill_output_kv_bindings)
+      if (b.is_key)
+        std::cout << b.layer_index << " ";
+    std::cout << "\n[KV-OUT-DBG] generation output KV layers (key only): ";
+    for (const auto &b : generation_output_kv_bindings)
+      if (b.is_key)
+        std::cout << b.layer_index << " ";
+    std::cout << "\n[KV-OUT-DBG] prefill bindings count="
+              << prefill_output_kv_bindings.size()
+              << " generation bindings count="
+              << generation_output_kv_bindings.size() << std::endl;
+    // ── Debug: dump prefill OUTPUT past_key shapes (sliding & full layers) ──
+    // Confirms whether the output is per-chunk [head_dim, 256] or full
+    // updated cache [head_dim, 7936+] or something else. The append code
+    // assumes per-chunk with src_row_length=context_size=256.
+    std::cout << "[KV-OUT-SHAPE-DBG] prefill output K shapes: ";
+    for (const auto &b : prefill_output_kv_bindings) {
+      if (!b.is_key)
+        continue;
+      if (b.layer_index > 5 && b.layer_index != 14)
+        continue;
+      const auto &info = prefill_graph_info.raw_outputs[b.output_index];
+      std::cout << "L" << b.layer_index << "=[";
+      for (size_t i = 0; i < info.dimensions.size(); ++i) {
+        if (i)
+          std::cout << ",";
+        std::cout << info.dimensions[i];
+      }
+      std::cout << "] ";
     }
-    std::cout << "] ";
-  }
-  std::cout << "\n[KV-OUT-SHAPE-DBG] prefill output V shapes: ";
-  for (const auto &b : prefill_output_kv_bindings) {
-    if (b.is_key)
-      continue;
-    if (b.layer_index > 5 && b.layer_index != 14)
-      continue;
-    const auto &info = prefill_graph_info.raw_outputs[b.output_index];
-    std::cout << "L" << b.layer_index << "=[";
-    for (size_t i = 0; i < info.dimensions.size(); ++i) {
-      if (i)
-        std::cout << ",";
-      std::cout << info.dimensions[i];
+    std::cout << "\n[KV-OUT-SHAPE-DBG] prefill output V shapes: ";
+    for (const auto &b : prefill_output_kv_bindings) {
+      if (b.is_key)
+        continue;
+      if (b.layer_index > 5 && b.layer_index != 14)
+        continue;
+      const auto &info = prefill_graph_info.raw_outputs[b.output_index];
+      std::cout << "L" << b.layer_index << "=[";
+      for (size_t i = 0; i < info.dimensions.size(); ++i) {
+        if (i)
+          std::cout << ",";
+        std::cout << info.dimensions[i];
+      }
+      std::cout << "] ";
     }
-    std::cout << "] ";
-  }
-  std::cout << "\n[KV-OUT-SHAPE-DBG] generation output K shapes: ";
-  for (const auto &b : generation_output_kv_bindings) {
-    if (!b.is_key)
-      continue;
-    if (b.layer_index > 5 && b.layer_index != 14)
-      continue;
-    const auto &info = generation_graph_info.raw_outputs[b.output_index];
-    std::cout << "L" << b.layer_index << "=[";
-    for (size_t i = 0; i < info.dimensions.size(); ++i) {
-      if (i)
-        std::cout << ",";
-      std::cout << info.dimensions[i];
+    std::cout << "\n[KV-OUT-SHAPE-DBG] generation output K shapes: ";
+    for (const auto &b : generation_output_kv_bindings) {
+      if (!b.is_key)
+        continue;
+      if (b.layer_index > 5 && b.layer_index != 14)
+        continue;
+      const auto &info = generation_graph_info.raw_outputs[b.output_index];
+      std::cout << "L" << b.layer_index << "=[";
+      for (size_t i = 0; i < info.dimensions.size(); ++i) {
+        if (i)
+          std::cout << ",";
+        std::cout << info.dimensions[i];
+      }
+      std::cout << "] ";
     }
-    std::cout << "] ";
+    std::cout << std::endl;
   }
-  std::cout << std::endl;
 
   // ── Logit dequant params (overrides setupParameters defaults) ──
   const auto &logits_info = GraphParser::get_tensor_info_or_throw(
     generation_graph_info.raw_outputs, "logits");
   logit_scale = logits_info.scale;
   logit_offset = logits_info.offset;
-  std::cout << "[LOGIT-DBG] dtype=" << logits_info.data_type
-            << " scale=" << logit_scale << " offset=" << logit_offset
-            << " | final_logit_softcapping=" << final_logit_softcapping
-            << std::endl;
+  if (debug_qnn_io_) {
+    std::cout << "[LOGIT-DBG] dtype=" << logits_info.data_type
+              << " scale=" << logit_scale << " offset=" << logit_offset
+              << " | final_logit_softcapping=" << final_logit_softcapping
+              << std::endl;
+  }
   // Diagnostic experiment: disable our externally-applied softcap if the
   // QNN graph already applies it internally (double-softcap would flatten
   // the distribution and produce structured-but-mixed-language gibberish).
   // Toggle by env var GEMMA4_DISABLE_SOFTCAP=1 to test.
   if (const char *env = std::getenv("GEMMA4_DISABLE_SOFTCAP");
       env && env[0] == '1') {
-    std::cout << "[LOGIT-DBG] GEMMA4_DISABLE_SOFTCAP=1 → forcing softcap=0"
-              << std::endl;
+    if (debug_qnn_io_) {
+      std::cout << "[LOGIT-DBG] GEMMA4_DISABLE_SOFTCAP=1 → forcing softcap=0"
+                << std::endl;
+    }
     final_logit_softcapping = 0.0f;
   }
   final_logit_softcapping = 0.0f;
@@ -1157,6 +1168,12 @@ void Gemma4_E2B_QNN::setupParameters(json &cfg, json &generation_cfg,
   lora_path = rebase_relative_to_model_file(lora_path, model_file_name);
   ple_file_name = nntr_cfg.value("ple_file_name", "");
   ple_file_name = rebase_relative_to_model_file(ple_file_name, model_file_name);
+
+  debug_qnn_io_ = nntr_cfg.value("debug_qnn_io", false);
+  if (const char *env = std::getenv("GEMMA4_QNN_DEBUG_IO")) {
+    debug_qnn_io_ = env[0] == '1' || env[0] == 't' || env[0] == 'T' ||
+                    env[0] == 'y' || env[0] == 'Y';
+  }
 }
 
 // =====================================================================
@@ -1178,6 +1195,11 @@ void Gemma4_E2B_QNN::run(const WSTR prompt, bool /*do_sample*/,
   auto &prefill_model = models[prefill_graph].model_handle;
   auto &generation_model = models[generation_graph].model_handle;
 
+  std::vector<uint8_t *> kv_ptrs;
+  kv_ptrs.reserve(kvs.size());
+  for (auto *kv : kvs)
+    kv_ptrs.push_back(reinterpret_cast<uint8_t *>(kv));
+
   const std::string model_prompt = promptToUtf8(prompt);
   auto _input = tokenizer->Encode(model_prompt);
   if (_input.size() <= 1) {
@@ -1193,7 +1215,10 @@ void Gemma4_E2B_QNN::run(const WSTR prompt, bool /*do_sample*/,
   if (kv_len + (int)input_len >= generation_full_kv_past_length)
     throw std::runtime_error("Input prompt leaves no room for generation");
 
+  _input.reserve(generation_full_kv_past_length + 1);
+
   std::vector<int> output;
+  output.reserve(generation_full_kv_past_length - input_len);
   std::vector<ml::train::TensorDim::IO_TensorType> outputs;
 
   auto append_generation_token_to_kv_cache = [&](int t) {
@@ -1211,9 +1236,6 @@ void Gemma4_E2B_QNN::run(const WSTR prompt, bool /*do_sample*/,
       rope_cache_seq_len);
     fill_generation_ple_(t);
     auto term = generation_model->inference(1, generation_inputs);
-    std::vector<uint8_t *> kv_ptrs;
-    for (auto *kv : kvs)
-      kv_ptrs.push_back((uint8_t *)kv);
     append_outputs_to_kv_cache(term, generation_output_kv_bindings, kv_ptrs,
                                kv_row_lengths, kv_len, 1, 1, generation_graph,
                                &kv_columns);
@@ -1289,7 +1311,7 @@ void Gemma4_E2B_QNN::run(const WSTR prompt, bool /*do_sample*/,
     outputs = prefill_model->inference(1, prefill_inputs);
 
     // ── Debug: dump raw prefill output for value layer 0 (first chunk only) ──
-    if (c == 0) {
+    if (debug_qnn_io_ && c == 0) {
       for (const auto &b : prefill_output_kv_bindings) {
         if (b.is_key || b.layer_index != 0)
           continue;
@@ -1307,57 +1329,55 @@ void Gemma4_E2B_QNN::run(const WSTR prompt, bool /*do_sample*/,
       }
     }
 
-    {
-      std::vector<uint8_t *> kv_ptrs;
-      for (auto *kv : kvs)
-        kv_ptrs.push_back((uint8_t *)kv);
-      append_outputs_to_kv_cache(outputs, prefill_output_kv_bindings, kv_ptrs,
-                                 kv_row_lengths, kv_len, chunk_len,
-                                 context_size, prefill_graph, &kv_columns);
-    }
+    append_outputs_to_kv_cache(outputs, prefill_output_kv_bindings, kv_ptrs,
+                               kv_row_lengths, kv_len, chunk_len, context_size,
+                               prefill_graph, &kv_columns);
     kv_len += chunk_len;
   }
 
   // ── Debug: Post-prefill KV cache state ──
-  std::cout << "\n=== Post-prefill KV cache debug ===" << std::endl;
-  std::cout << "KV cache layers: " << kvs.size() / 2 << std::endl;
-  std::cout << "kv_len after prefill: " << kv_len << std::endl;
+  if (debug_qnn_io_) {
+    std::cout << "\n=== Post-prefill KV cache debug ===" << std::endl;
+    std::cout << "KV cache layers: " << kvs.size() / 2 << std::endl;
+    std::cout << "kv_len after prefill: " << kv_len << std::endl;
 
-  // Dump entire KV cache for layer 0
-  {
-    int layer = 0;
-    uint8_t *key_ptr = (uint8_t *)kvs[layer * 2];
-    uint8_t *val_ptr = (uint8_t *)kvs[layer * 2 + 1];
-    int row_len = kv_row_lengths[layer];
-    int col = kv_columns[layer];
-    std::cout << "\n=== Layer 0 FULL KV CACHE DUMP ===" << std::endl;
-    std::cout << "Key layout: [head_dim=" << col << ", seq_len=" << row_len
-              << "]" << std::endl;
-    std::cout << "Value layout: [seq_len=" << row_len << ", head_dim=" << col
-              << "]" << std::endl;
+    // Dump entire KV cache for layer 0
+    {
+      int layer = 0;
+      uint8_t *key_ptr = (uint8_t *)kvs[layer * 2];
+      uint8_t *val_ptr = (uint8_t *)kvs[layer * 2 + 1];
+      int row_len = kv_row_lengths[layer];
+      int col = kv_columns[layer];
+      std::cout << "\n=== Layer 0 FULL KV CACHE DUMP ===" << std::endl;
+      std::cout << "Key layout: [head_dim=" << col << ", seq_len=" << row_len
+                << "]" << std::endl;
+      std::cout << "Value layout: [seq_len=" << row_len << ", head_dim=" << col
+                << "]" << std::endl;
 
-    // Dump key cache for first 5 positions
-    std::cout << "\n--- Key cache (first 5 positions, first 10 head_dim values "
-                 "each) ---"
-              << std::endl;
-    for (int pos = 0; pos < 5 && pos < kv_len; ++pos) {
-      std::cout << "key[" << pos << "][0..9]: ";
-      for (int h = 0; h < 10 && h < col; ++h) {
-        std::cout << (int)key_ptr[h * row_len + pos] << " ";
+      // Dump key cache for first 5 positions
+      std::cout
+        << "\n--- Key cache (first 5 positions, first 10 head_dim values "
+           "each) ---"
+        << std::endl;
+      for (int pos = 0; pos < 5 && pos < kv_len; ++pos) {
+        std::cout << "key[" << pos << "][0..9]: ";
+        for (int h = 0; h < 10 && h < col; ++h) {
+          std::cout << (int)key_ptr[h * row_len + pos] << " ";
+        }
+        std::cout << std::endl;
       }
-      std::cout << std::endl;
-    }
 
-    // Dump value cache for first 5 positions
-    std::cout << "\n--- Value cache (first 5 positions, first 10 head_dim "
-                 "values each) ---"
-              << std::endl;
-    for (int pos = 0; pos < 5 && pos < kv_len; ++pos) {
-      std::cout << "value[" << pos << "][0..9]: ";
-      for (int h = 0; h < 10 && h < col; ++h) {
-        std::cout << (int)val_ptr[pos * col + h] << " ";
+      // Dump value cache for first 5 positions
+      std::cout << "\n--- Value cache (first 5 positions, first 10 head_dim "
+                   "values each) ---"
+                << std::endl;
+      for (int pos = 0; pos < 5 && pos < kv_len; ++pos) {
+        std::cout << "value[" << pos << "][0..9]: ";
+        for (int h = 0; h < 10 && h < col; ++h) {
+          std::cout << (int)val_ptr[pos * col + h] << " ";
+        }
+        std::cout << std::endl;
       }
-      std::cout << std::endl;
     }
   }
 
@@ -1380,7 +1400,7 @@ void Gemma4_E2B_QNN::run(const WSTR prompt, bool /*do_sample*/,
     fill_generation_ple_(token);
 
     // ── Debug: dump generation inputs for first 3 steps ──
-    if (idx - prefill_len < 3) {
+    if (debug_qnn_io_ && idx - prefill_len < 3) {
       std::cout << "\n=== GENERATION STEP " << (idx - prefill_len)
                 << " (position=" << idx << ", token=" << token
                 << ") ===" << std::endl;
@@ -1454,7 +1474,7 @@ void Gemma4_E2B_QNN::run(const WSTR prompt, bool /*do_sample*/,
     outputs = generation_model->inference(1, generation_inputs);
 
     // ── Debug: dump generation model outputs for first 3 steps ──
-    if (idx - prefill_len < 3) {
+    if (debug_qnn_io_ && idx - prefill_len < 3) {
       std::cout << "\n=== GENERATION MODEL OUTPUTS for step "
                 << (idx - prefill_len) << " ===" << std::endl;
 
@@ -1482,14 +1502,9 @@ void Gemma4_E2B_QNN::run(const WSTR prompt, bool /*do_sample*/,
       std::cout << "=== END GENERATION OUTPUTS ===" << std::endl;
     }
 
-    {
-      std::vector<uint8_t *> kv_ptrs;
-      for (auto *kv : kvs)
-        kv_ptrs.push_back((uint8_t *)kv);
-      append_outputs_to_kv_cache(outputs, generation_output_kv_bindings,
-                                 kv_ptrs, kv_row_lengths, idx, 1, 1,
-                                 generation_graph, &kv_columns);
-    }
+    append_outputs_to_kv_cache(outputs, generation_output_kv_bindings, kv_ptrs,
+                               kv_row_lengths, idx, 1, 1, generation_graph,
+                               &kv_columns);
     kv_len += 1;
     token = ::sample(
       std::get<uint16_t *>(outputs[generation_logits_output_index]), vocab_size,

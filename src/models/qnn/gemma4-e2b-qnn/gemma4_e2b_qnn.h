@@ -21,8 +21,8 @@ class Gemma4_E2B_QNN : public Quick_Dot_AI_QNN {
 public:
   static constexpr const char *architectures = "Gemma4_E2B_QNN";
 
-  Gemma4_E2B_QNN(json &cfg, json &generation_cfg, json &nntr_cfg)
-      : Quick_Dot_AI_QNN(cfg, generation_cfg, nntr_cfg) {
+  Gemma4_E2B_QNN(json &cfg, json &generation_cfg, json &nntr_cfg) :
+    Quick_Dot_AI_QNN(cfg, generation_cfg, nntr_cfg) {
     LOGD("Gemma4 E2B parameters set up ");
     setupParameters(cfg, generation_cfg, nntr_cfg);
   }
@@ -198,6 +198,12 @@ private:
 
   std::string lora_path;
   std::string ple_file_name;
+
+  // Off by default: detailed tensor dumps are useful while validating a new
+  // converted graph, but synchronous stdout in the token loop is expensive on
+  // Android. Enable with nntr_config { "debug_qnn_io": true } or
+  // GEMMA4_QNN_DEBUG_IO=1.
+  bool debug_qnn_io_ = false;
 };
 
 } // namespace causallm
