@@ -292,7 +292,7 @@ Progress:
 - Modify: `Android/QuickDotAI/src/main/cpp/quickai_jni.cpp`
 - Modify: `Android/QuickDotAI/src/main/java/com/example/quickdotai/NativeCausalLm.kt`
 
-- [ ] **Step 1: Write failing JNI/API compile check**
+- [x] **Step 1: Write failing JNI/API compile check**
 
 Add the Kotlin external declaration first:
 
@@ -307,7 +307,7 @@ external fun loadMultimodalCompositionJsonNative(
 
 Expected initial result: native symbol missing or C API declaration missing.
 
-- [ ] **Step 2: Add C API declaration**
+- [x] **Step 2: Add C API declaration**
 
 Add:
 
@@ -320,17 +320,17 @@ WIN_EXPORT ErrorCode loadMultimodalCompositionJson(
   CausalLmHandle *out_handle);
 ```
 
-- [ ] **Step 3: Implement JSON parse and validation only**
+- [x] **Step 3: Implement JSON parse and validation only**
 
 Parse `llm.model_id`, `llm.backend`, `vision.model_id`, `vision.backend`, `connector.model_id`, `connector.backend`.
 
 Initially return `CAUSAL_LM_ERROR_UNSUPPORTED` after validation succeeds so the API contract can be compiled before real load.
 
-- [ ] **Step 4: Add JNI wrapper**
+- [x] **Step 4: Add JNI wrapper**
 
 Implement `Java_com_example_quickdotai_NativeCausalLm_loadMultimodalCompositionJsonNative`.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run:
 
@@ -341,7 +341,13 @@ cd Android
 ```
 
 Progress:
-- 2026-06-08: Pending.
+- 2026-06-08: Added `scripts/check_multimodal_composition_api_contract.sh`. RED confirmed with `FAIL: C API declaration for loadMultimodalCompositionJson is missing`.
+- 2026-06-08: Added `loadMultimodalCompositionJson` C API declaration and validation-only implementation for composition id, LLM, vision, connector, per-component backend, role, and compatibility checks.
+- 2026-06-08: Added JNI entry point `Java_com_example_quickdotai_NativeCausalLm_loadMultimodalCompositionJsonNative` and Kotlin external declaration `loadMultimodalCompositionJsonNative`.
+- 2026-06-08: Added Android bundled C API header coverage after RED from `:QuickDotAI:externalNativeBuildDebug` showed the JNI CMake include path was stale.
+- 2026-06-08: GREEN confirmed for `bash scripts/check_multimodal_composition_api_contract.sh`, `bash scripts/check_multimodal_composition_contract.sh`, and `bash scripts/check_multimodal_catalog_contract.sh`.
+- 2026-06-08: Native verification passed with `./build.sh --target=api`.
+- 2026-06-08: Android verification passed with `./gradlew :QuickDotAI:compileDebugKotlin` and `./gradlew :QuickDotAI:externalNativeBuildDebug` after rebuilding/copying the ignored Android `libquick_dot_ai_api.so` prebuilt for local verification.
 
 ---
 

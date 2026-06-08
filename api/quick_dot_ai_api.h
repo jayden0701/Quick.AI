@@ -254,6 +254,34 @@ WIN_EXPORT ErrorCode loadMultimodalHandleByName(
   CausalLmHandle *out_handle);
 
 /**
+ * @brief Validate and load a descriptor-driven multimodal composition.
+ *
+ * The JSON payload selects role-based components and a backend for each
+ * component, for example:
+ *   {"id":"lfm2-siglip",
+ *    "llm":{"model_id":"lfm2-siglip-llm","backend":"CPU"},
+ *    "vision":{"model_id":"siglip-lfm2-vision","backend":"CPU"},
+ *    "connector":{"model_id":"lfm2-siglip-connector","backend":"CPU"}}
+ *
+ * Task 3 validates the descriptor contract and returns
+ * CAUSAL_LM_ERROR_UNSUPPORTED after successful validation; real component
+ * loading is added by later tasks.
+ *
+ * @param composition_json JSON composition descriptor.
+ * @param quant_type Quantization type for loadable components.
+ * @param native_lib_dir Native library directory path. May be NULL.
+ * @param model_base_path Base path for model files. May be NULL.
+ * @param out_handle Out-parameter receiving the new handle on success.
+ * @return ErrorCode. CAUSAL_LM_ERROR_INVALID_PARAMETER for malformed or
+ *         incompatible composition JSON; CAUSAL_LM_ERROR_UNSUPPORTED until
+ *         real composition loading is implemented.
+ */
+WIN_EXPORT ErrorCode loadMultimodalCompositionJson(
+  const char *composition_json, ModelQuantizationType quant_type,
+  const char *native_lib_dir, const char *model_base_path,
+  CausalLmHandle *out_handle);
+
+/**
  * @brief Run inference on a specific handle.
  *
  * The returned outputText pointer is owned by the handle and remains valid

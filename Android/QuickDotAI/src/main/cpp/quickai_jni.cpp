@@ -241,6 +241,41 @@ Java_com_example_quickdotai_NativeCausalLm_loadModelHandleByNameNative(
            : 0L;
 }
 
+// ---- loadMultimodalCompositionJson (descriptor composition path) ----------
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_example_quickdotai_NativeCausalLm_loadMultimodalCompositionJsonNative(
+  JNIEnv *env, jobject /*thiz*/, jstring compositionJsonJ, jint quant,
+  jstring nativeLibDirJ, jstring modelBasePathJ) {
+  if (compositionJsonJ == nullptr) {
+    return 0L;
+  }
+
+  const char *composition_json =
+    env->GetStringUTFChars(compositionJsonJ, nullptr);
+  if (composition_json == nullptr) {
+    return 0L;
+  }
+
+  const char *nld =
+    nativeLibDirJ ? env->GetStringUTFChars(nativeLibDirJ, nullptr) : nullptr;
+  const char *mbp =
+    modelBasePathJ ? env->GetStringUTFChars(modelBasePathJ, nullptr) : nullptr;
+
+  CausalLmHandle h = nullptr;
+  ErrorCode ec = loadMultimodalCompositionJson(
+    composition_json, static_cast<ModelQuantizationType>(quant), nld, mbp, &h);
+
+  env->ReleaseStringUTFChars(compositionJsonJ, composition_json);
+  if (nld)
+    env->ReleaseStringUTFChars(nativeLibDirJ, nld);
+  if (mbp)
+    env->ReleaseStringUTFChars(modelBasePathJ, mbp);
+
+  return (ec == CAUSAL_LM_ERROR_NONE)
+           ? static_cast<jlong>(reinterpret_cast<uintptr_t>(h))
+           : 0L;
+}
+
 // ---- nativeQueryCatalog ---------------------------------------------------
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_example_quickdotai_NativeCausalLm_nativeQueryCatalog(

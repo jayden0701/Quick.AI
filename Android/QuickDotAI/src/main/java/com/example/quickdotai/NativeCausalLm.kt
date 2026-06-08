@@ -179,6 +179,17 @@ object NativeCausalLm {
         modelBasePath: String?,
     ): Long
 
+    /**
+     * @brief Loads a descriptor-driven multimodal composition from JSON.
+     * @return Handle as Long, or 0 on failure/unsupported composition load.
+     */
+    external fun loadMultimodalCompositionJsonNative(
+        compositionJson: String,
+        quant: Int,
+        nativeLibDir: String?,
+        modelBasePath: String?,
+    ): Long
+
     /** @brief Returns the registered model catalog as a JSON array string. */
     external fun nativeQueryCatalog(): String
 

@@ -239,6 +239,127 @@ static std::optional<ModelDescriptor> find_descriptor_by_id(const char *id) {
   return false;
 }
 
+struct CompositionComponentSpec {
+  std::string model_id;
+  BackendType backend = CAUSAL_LM_BACKEND_CPU;
+  ModelDescriptor descriptor{};
+};
+
+static std::optional<BackendType> parse_backend_name(std::string backend) {
+  std::transform(backend.begin(), backend.end(), backend.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::toupper(c));
+                 });
+  if (backend == "CPU")
+    return CAUSAL_LM_BACKEND_CPU;
+  if (backend == "GPU")
+    return CAUSAL_LM_BACKEND_GPU;
+  if (backend == "NPU")
+    return CAUSAL_LM_BACKEND_NPU;
+  return std::nullopt;
+}
+
+static bool read_non_empty_string(const json &object, const char *field,
+                                  std::string &out) {
+  if (!object.contains(field) || !object.at(field).is_string())
+    return false;
+  out = object.at(field).get<std::string>();
+  return !out.empty();
+}
+
+static ErrorCode parse_composition_component(
+  const json &root, const char *field, ModelRole expected_role,
+  CompositionComponentSpec &out_component) {
+  if (!root.contains(field) || !root.at(field).is_object()) {
+    LOGE("loadMultimodalCompositionJson: missing object '%s'", field);
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
+  const json &component = root.at(field);
+  std::string model_id;
+  std::string backend_name;
+  if (!read_non_empty_string(component, "model_id", model_id) ||
+      !read_non_empty_string(component, "backend", backend_name)) {
+    LOGE("loadMultimodalCompositionJson: '%s' requires model_id and backend",
+         field);
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
+  auto backend = parse_backend_name(backend_name);
+  if (!backend) {
+    LOGE("loadMultimodalCompositionJson: invalid backend '%s' for '%s'",
+         backend_name.c_str(), field);
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
+  auto descriptor = find_descriptor_by_id(model_id.c_str());
+  if (!descriptor) {
+    LOGE("loadMultimodalCompositionJson: unknown descriptor '%s'",
+         model_id.c_str());
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
+  if (!descriptor_has_role(*descriptor, expected_role)) {
+    LOGE("loadMultimodalCompositionJson: descriptor '%s' has unexpected role",
+         model_id.c_str());
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
+  if (!descriptor_allows_backend(*descriptor, *backend)) {
+    LOGE("loadMultimodalCompositionJson: backend '%s' is not supported by '%s'",
+         backend_name.c_str(), model_id.c_str());
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
+  out_component.model_id = std::move(model_id);
+  out_component.backend = *backend;
+  out_component.descriptor = *descriptor;
+  return CAUSAL_LM_ERROR_NONE;
+}
+
+static bool descriptor_lists_compatible_id(const ModelDescriptor &a,
+                                           const char *b_id) {
+  return descriptor_compatible_with(a, b_id);
+}
+
+static ErrorCode validate_composition_compatibility(
+  const ModelDescriptor &composition,
+  const CompositionComponentSpec &llm,
+  const CompositionComponentSpec &vision,
+  const CompositionComponentSpec &connector) {
+  if (!descriptor_has_role(composition, QDA_ROLE_COMPOSITION)) {
+    LOGE("loadMultimodalCompositionJson: top-level descriptor is not a "
+         "composition");
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
+  if (!descriptor_lists_compatible_id(composition, llm.model_id.c_str()) ||
+      !descriptor_lists_compatible_id(composition, vision.model_id.c_str()) ||
+      !descriptor_lists_compatible_id(composition,
+                                      connector.model_id.c_str())) {
+    LOGE("loadMultimodalCompositionJson: component is not compatible with "
+         "composition '%s'",
+         composition.id ? composition.id : "(null)");
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
+  if (!descriptor_lists_compatible_id(llm.descriptor, vision.model_id.c_str()) ||
+      !descriptor_lists_compatible_id(llm.descriptor,
+                                      connector.model_id.c_str()) ||
+      !descriptor_lists_compatible_id(vision.descriptor, llm.model_id.c_str()) ||
+      !descriptor_lists_compatible_id(vision.descriptor,
+                                      connector.model_id.c_str()) ||
+      !descriptor_lists_compatible_id(connector.descriptor,
+                                      llm.model_id.c_str()) ||
+      !descriptor_lists_compatible_id(connector.descriptor,
+                                      vision.model_id.c_str())) {
+    LOGE("loadMultimodalCompositionJson: incompatible component pair");
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
+  return CAUSAL_LM_ERROR_NONE;
+}
+
 // Library-owned buffer: rebuilt on every call and returned via c_str().
 // The pointer is valid only until the next call to getModelCatalogJson().
 static std::string g_catalog_json_cache;
@@ -1973,6 +2094,76 @@ ErrorCode loadMultimodalHandleByName(BackendType compute,
 
   *out_handle = h;
   return CAUSAL_LM_ERROR_NONE;
+}
+
+ErrorCode loadMultimodalCompositionJson(const char *composition_json,
+                                        ModelQuantizationType quant_type,
+                                        const char *native_lib_dir,
+                                        const char *model_base_path,
+                                        CausalLmHandle *out_handle) {
+  (void)quant_type;
+  (void)native_lib_dir;
+  (void)model_base_path;
+
+  if (out_handle == nullptr || composition_json == nullptr) {
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+  *out_handle = nullptr;
+
+  register_models();
+
+  try {
+    const json root = json::parse(composition_json);
+    if (!root.is_object()) {
+      LOGE("loadMultimodalCompositionJson: root must be a JSON object");
+      return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+    }
+
+    std::string composition_id;
+    if (!read_non_empty_string(root, "id", composition_id)) {
+      LOGE("loadMultimodalCompositionJson: composition id is missing");
+      return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+    }
+
+    auto composition = find_descriptor_by_id(composition_id.c_str());
+    if (!composition) {
+      LOGE("loadMultimodalCompositionJson: unknown composition '%s'",
+           composition_id.c_str());
+      return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+    }
+
+    CompositionComponentSpec llm;
+    CompositionComponentSpec vision;
+    CompositionComponentSpec connector;
+
+    ErrorCode ec =
+      parse_composition_component(root, "llm", QDA_ROLE_TEXT_LLM, llm);
+    if (ec != CAUSAL_LM_ERROR_NONE)
+      return ec;
+
+    ec = parse_composition_component(root, "vision", QDA_ROLE_VISION_ENCODER,
+                                     vision);
+    if (ec != CAUSAL_LM_ERROR_NONE)
+      return ec;
+
+    ec = parse_composition_component(root, "connector", QDA_ROLE_CONNECTOR,
+                                     connector);
+    if (ec != CAUSAL_LM_ERROR_NONE)
+      return ec;
+
+    ec = validate_composition_compatibility(*composition, llm, vision,
+                                            connector);
+    if (ec != CAUSAL_LM_ERROR_NONE)
+      return ec;
+
+    return CAUSAL_LM_ERROR_UNSUPPORTED;
+  } catch (const json::exception &e) {
+    LOGE("loadMultimodalCompositionJson: JSON error: %s", e.what());
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  } catch (const std::exception &e) {
+    LOGE("loadMultimodalCompositionJson: validation error: %s", e.what());
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
 }
 
 ErrorCode saveQnnKvCacheHandle(CausalLmHandle handle, const char *cache_path) {
