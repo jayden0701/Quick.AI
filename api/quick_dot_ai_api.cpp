@@ -22,6 +22,7 @@
 #include <cstring>
 #include <cxxabi.h>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -100,6 +101,7 @@ struct LoadedComponent {
 
 struct ConnectorAdapter {
   virtual ~ConnectorAdapter() = default;
+  virtual size_t input_embedding_dim() const = 0;
   virtual size_t output_embedding_dim() const = 0;
   virtual std::vector<float> project(
     const std::vector<float> &vision_features, int num_tokens) = 0;
@@ -113,6 +115,14 @@ public:
     if (!connector_) {
       throw std::invalid_argument("Lfm2ConnectorAdapter: connector is null");
     }
+  }
+
+  size_t input_embedding_dim() const override {
+    const unsigned int factor = connector_->downsampleFactor();
+    const unsigned int scale = factor * factor;
+    if (scale == 0 || connector_->inFeatures() % scale != 0)
+      return 0;
+    return connector_->inFeatures() / scale;
   }
 
   size_t output_embedding_dim() const override {
@@ -134,14 +144,12 @@ public:
         "Lfm2ConnectorAdapter: vision token count must be a square grid");
     }
 
-    const unsigned int factor = connector_->downsampleFactor();
-    const unsigned int scale = factor * factor;
-    if (scale == 0 || connector_->inFeatures() % scale != 0) {
+    const size_t embed_dim = input_embedding_dim();
+    if (embed_dim == 0) {
       throw std::invalid_argument(
         "Lfm2ConnectorAdapter: invalid connector input dimension");
     }
 
-    const unsigned int embed_dim = connector_->inFeatures() / scale;
     const size_t expected_size =
       static_cast<size_t>(n_patches) * embed_dim;
     if (vision_features.size() != expected_size) {
@@ -149,7 +157,8 @@ public:
         "Lfm2ConnectorAdapter: vision feature size does not match grid");
     }
 
-    return connector_->project(vision_features, n_patches, embed_dim,
+    return connector_->project(vision_features, n_patches,
+                               static_cast<unsigned int>(embed_dim),
                                patch_side, patch_side);
   }
 
@@ -208,6 +217,20 @@ append_loaded_component(CausalLmModel &h, LoadedComponent component) {
   return model;
 }
 
+static bool move_first_loaded_component(CausalLmModel &src, CausalLmModel &dst,
+                                        ModelRole role, const char *id,
+                                        BackendType backend) {
+  if (src.components.empty() || !src.components[0].model)
+    return false;
+  LoadedComponent component = std::move(src.components[0]);
+  component.role = role;
+  component.id = id ? id : "";
+  component.backend = backend;
+  append_loaded_component(dst, std::move(component));
+  clear_loaded_components(src);
+  return true;
+}
+
 static std::optional<size_t> find_component_index(const CausalLmModel &h,
                                                   ModelRole role) {
   for (size_t i = 0; i < h.components.size(); ++i) {
@@ -232,6 +255,10 @@ static causallm::Transformer *find_text_llm(CausalLmModel &h) {
 
 static causallm::Transformer *find_vision_encoder(CausalLmModel &h) {
   return find_component(h, QDA_ROLE_VISION_ENCODER);
+}
+
+static ConnectorAdapter *find_connector_adapter(CausalLmModel &h) {
+  return h.connectors.empty() ? nullptr : h.connectors[0].get();
 }
 
 static std::map<std::string, std::string> g_model_path_map = {
@@ -1707,6 +1734,21 @@ static ErrorCode load_into_handle(CausalLmModel &h, BackendType compute,
   return CAUSAL_LM_ERROR_NONE;
 }
 
+static ErrorCode load_transformer_component(
+  const CompositionComponentSpec &component, ModelQuantizationType quant_type,
+  const char *native_lib_dir, const char *model_base_path,
+  CausalLmModel &out_component) {
+  try {
+    const std::string load_key = descriptor_model_key(component.descriptor);
+    return load_into_handle(out_component, component.backend, load_key.c_str(),
+                            quant_type, native_lib_dir, model_base_path);
+  } catch (const std::exception &e) {
+    LOGE("load_transformer_component: descriptor '%s' failed: %s",
+         component.model_id.c_str(), e.what());
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+}
+
 /** ModelType overload: translates enum → config_name then delegates. */
 static ErrorCode load_into_handle(CausalLmModel &h, BackendType compute,
                                   ModelType modeltype,
@@ -2273,21 +2315,10 @@ ErrorCode loadMultimodalHandleByName(BackendType compute,
   if (!h)
     return CAUSAL_LM_ERROR_UNKNOWN;
 
-  auto move_one = [](CausalLmModel &src, CausalLmModel &dst, ModelRole role,
-                     const char *id, BackendType backend) -> bool {
-    if (src.components.empty() || !src.components[0].model)
-      return false;
-    LoadedComponent component = std::move(src.components[0]);
-    component.role = role;
-    component.id = id ? id : "";
-    component.backend = backend;
-    append_loaded_component(dst, std::move(component));
-    clear_loaded_components(src);
-    return true;
-  };
-  if (!move_one(tmp_vision, *h, QDA_ROLE_VISION_ENCODER, embedding_model_id,
-                compute) ||
-      !move_one(tmp_llm, *h, QDA_ROLE_TEXT_LLM, llm_model_id, compute)) {
+  if (!move_first_loaded_component(tmp_vision, *h, QDA_ROLE_VISION_ENCODER,
+                                   embedding_model_id, compute) ||
+      !move_first_loaded_component(tmp_llm, *h, QDA_ROLE_TEXT_LLM,
+                                   llm_model_id, compute)) {
     delete h;
     return CAUSAL_LM_ERROR_MODEL_LOAD_FAILED;
   }
@@ -2299,15 +2330,94 @@ ErrorCode loadMultimodalHandleByName(BackendType compute,
   return CAUSAL_LM_ERROR_NONE;
 }
 
+static bool is_lfm2_siglip_cpu_composition(
+  const std::string &composition_id, const CompositionComponentSpec &llm,
+  const CompositionComponentSpec &vision,
+  const CompositionComponentSpec &connector) {
+  return composition_id == "lfm2-siglip" &&
+         llm.model_id == "lfm2-siglip-llm" &&
+         vision.model_id == "siglip-lfm2-vision" &&
+         connector.model_id == "lfm2-siglip-connector" &&
+         llm.backend == CAUSAL_LM_BACKEND_CPU &&
+         vision.backend == CAUSAL_LM_BACKEND_CPU &&
+         connector.backend == CAUSAL_LM_BACKEND_CPU;
+}
+
+static ErrorCode load_lfm2_siglip_composition_handle(
+  const CompositionComponentSpec &llm,
+  const CompositionComponentSpec &vision,
+  const CompositionComponentSpec &connector,
+  ModelQuantizationType quant_type,
+  const char *native_lib_dir,
+  const char *model_base_path,
+  CausalLmHandle *out_handle) {
+  CausalLmModel tmp_llm;
+  CausalLmModel tmp_vision;
+
+  ErrorCode ec = load_transformer_component(llm, quant_type, native_lib_dir,
+                                            model_base_path, tmp_llm);
+  if (ec != CAUSAL_LM_ERROR_NONE) {
+    LOGE("load_lfm2_siglip_composition_handle: LLM '%s' load failed (%d)",
+         llm.model_id.c_str(), ec);
+    return ec;
+  }
+
+  ec = load_transformer_component(vision, quant_type, native_lib_dir,
+                                  model_base_path, tmp_vision);
+  if (ec != CAUSAL_LM_ERROR_NONE) {
+    LOGE("load_lfm2_siglip_composition_handle: vision '%s' load failed (%d)",
+         vision.model_id.c_str(), ec);
+    return ec;
+  }
+
+  if (tmp_llm.models.empty() || tmp_llm.models[0] == nullptr ||
+      tmp_vision.models.empty() || tmp_vision.models[0] == nullptr) {
+    return CAUSAL_LM_ERROR_MODEL_LOAD_FAILED;
+  }
+
+  if (tmp_llm.models[0]->embeddingBytesPerToken() == 0) {
+    LOGE("load_lfm2_siglip_composition_handle: LLM '%s' has no embedding "
+         "table",
+         llm.model_id.c_str());
+    return CAUSAL_LM_ERROR_UNSUPPORTED;
+  }
+
+  std::unique_ptr<ConnectorAdapter> connector_adapter;
+  try {
+    connector_adapter =
+      load_lfm2_connector_adapter(connector.descriptor, quant_type,
+                                  model_base_path);
+  } catch (const std::exception &e) {
+    LOGE("load_lfm2_siglip_composition_handle: connector '%s' load failed: %s",
+         connector.model_id.c_str(), e.what());
+    return CAUSAL_LM_ERROR_MODEL_LOAD_FAILED;
+  }
+
+  auto *h = new (std::nothrow) CausalLmModel();
+  if (!h)
+    return CAUSAL_LM_ERROR_UNKNOWN;
+
+  if (!move_first_loaded_component(tmp_vision, *h, QDA_ROLE_VISION_ENCODER,
+                                   vision.model_id.c_str(), vision.backend) ||
+      !move_first_loaded_component(tmp_llm, *h, QDA_ROLE_TEXT_LLM,
+                                   llm.model_id.c_str(), llm.backend)) {
+    delete h;
+    return CAUSAL_LM_ERROR_MODEL_LOAD_FAILED;
+  }
+
+  h->connectors.push_back(std::move(connector_adapter));
+  if (native_lib_dir != nullptr)
+    h->native_lib_dir = native_lib_dir;
+  h->initialized = true;
+  *out_handle = h;
+  return CAUSAL_LM_ERROR_NONE;
+}
+
 ErrorCode loadMultimodalCompositionJson(const char *composition_json,
                                         ModelQuantizationType quant_type,
                                         const char *native_lib_dir,
                                         const char *model_base_path,
                                         CausalLmHandle *out_handle) {
-  (void)quant_type;
-  (void)native_lib_dir;
-  (void)model_base_path;
-
   if (out_handle == nullptr || composition_json == nullptr) {
     return CAUSAL_LM_ERROR_INVALID_PARAMETER;
   }
@@ -2358,6 +2468,13 @@ ErrorCode loadMultimodalCompositionJson(const char *composition_json,
                                             connector);
     if (ec != CAUSAL_LM_ERROR_NONE)
       return ec;
+
+    if (is_lfm2_siglip_cpu_composition(composition_id, llm, vision,
+                                       connector)) {
+      return load_lfm2_siglip_composition_handle(
+        llm, vision, connector, quant_type, native_lib_dir, model_base_path,
+        out_handle);
+    }
 
     return CAUSAL_LM_ERROR_UNSUPPORTED;
   } catch (const json::exception &e) {
@@ -2656,7 +2773,6 @@ ErrorCode cancelModelHandle(CausalLmHandle handle) {
  * CAUSAL_LM_ERROR_UNSUPPORTED.
  *============================================================================*/
 
-#ifdef ENABLE_QNN
 /**
  * Model-agnostic multimodal composer. Works through base Transformer virtuals
  * only (no concrete-model casts), so any [vision producer, LLM consumer] pair
@@ -2761,6 +2877,18 @@ static ErrorCode execute_multimodal(CausalLmModel &h,
  * @return image_embeds (ownership transferred to caller) or {nullptr,0}.
  */
 static causallm::multimodal_pointer
+copy_float_vector_to_multimodal_pointer(const std::vector<float> &values) {
+  const size_t bytes = values.size() * sizeof(float);
+  if (bytes == 0)
+    return {nullptr, 0};
+  auto *copy = static_cast<float *>(std::malloc(bytes));
+  if (copy == nullptr)
+    throw std::bad_alloc();
+  std::memcpy(copy, values.data(), bytes);
+  return {copy, bytes};
+}
+
+static causallm::multimodal_pointer
 run_vision_encoder(CausalLmModel &h, const char *prompt,
                    const float *pixelValues, int numPatches,
                    int originalHeight, int originalWidth) {
@@ -2779,11 +2907,44 @@ run_vision_encoder(CausalLmModel &h, const char *prompt,
                              PATCH_SIZE * sizeof(float);
   causallm::multimodal_pointer image_in{const_cast<float *>(pixelValues),
                                         pixel_bytes};
-  return vision->run_image(std::string(prompt ? prompt : ""), image_in,
-                           originalHeight, originalWidth, /*do_sample=*/false,
-                           "", "", g_verbose);
+  auto image_embeds =
+    vision->run_image(std::string(prompt ? prompt : ""), image_in,
+                      originalHeight, originalWidth, /*do_sample=*/false, "",
+                      "", g_verbose);
+
+  auto *connector = find_connector_adapter(h);
+  if (connector == nullptr)
+    return image_embeds;
+
+  if (image_embeds.first == nullptr || image_embeds.second == 0)
+    return image_embeds;
+  if (image_embeds.second % sizeof(float) != 0) {
+    std::free(image_embeds.first);
+    return {nullptr, 0};
+  }
+
+  const size_t float_count = image_embeds.second / sizeof(float);
+  std::vector<float> vision_features(float_count);
+  std::memcpy(vision_features.data(), image_embeds.first, image_embeds.second);
+  std::free(image_embeds.first);
+
+  const size_t input_dim = connector->input_embedding_dim();
+  if (input_dim == 0 || vision_features.size() % input_dim != 0) {
+    LOGE("[MM] connector input_dim=%zu does not divide vision floats=%zu",
+         input_dim, vision_features.size());
+    return {nullptr, 0};
+  }
+
+  const size_t num_tokens = vision_features.size() / input_dim;
+  if (num_tokens > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    LOGE("[MM] too many vision tokens for connector: %zu", num_tokens);
+    return {nullptr, 0};
+  }
+
+  auto projected =
+    connector->project(vision_features, static_cast<int>(num_tokens));
+  return copy_float_vector_to_multimodal_pointer(projected);
 }
-#endif // ENABLE_QNN
 
 ErrorCode runMultimodalHandleStreaming(CausalLmHandle handle,
                                        const char *prompt,
@@ -2845,7 +3006,6 @@ ErrorCode runMultimodalHandleStreaming(CausalLmHandle handle,
          (totalValues > 4 ? pixelValues[4] : 0.0f));
   }
 
-#ifdef ENABLE_QNN
   // Generic path: models[0]=vision producer, models[1]=LLM consumer.
   causallm::multimodal_pointer image_embeds{nullptr, 0};
   try {
@@ -2869,10 +3029,6 @@ ErrorCode runMultimodalHandleStreaming(CausalLmHandle handle,
                                               input_already_formatted);
 
   return execute_multimodal(h, llm, image_embeds, input, callback, user_data);
-#else
-  LOGE("[DEBUG] runMultimodalHandleStreaming: built without ENABLE_QNN");
-  return CAUSAL_LM_ERROR_UNSUPPORTED;
-#endif
 }
 
 ErrorCode runMultimodalHandleWithMessages(
@@ -2950,7 +3106,6 @@ ErrorCode runMultimodalHandleWithMessages(
          (totalValues > 4 ? pixelValues[4] : 0.0f));
   }
 
-#ifdef ENABLE_QNN
   causallm::multimodal_pointer image_embeds{nullptr, 0};
   try {
     image_embeds = run_vision_encoder(h, prompt.c_str(), pixelValues,
@@ -2980,11 +3135,6 @@ ErrorCode runMultimodalHandleWithMessages(
     *outputText = nullptr;
     return ec;
   }
-#else
-  LOGE("[DEBUG] runMultimodalHandleWithMessages: built without ENABLE_QNN");
-  *outputText = nullptr;
-  return CAUSAL_LM_ERROR_UNSUPPORTED;
-#endif
   *outputText = h.last_output.c_str();
   return CAUSAL_LM_ERROR_NONE;
 }

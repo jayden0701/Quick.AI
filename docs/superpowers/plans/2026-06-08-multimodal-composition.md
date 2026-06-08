@@ -539,29 +539,29 @@ Progress:
 - Modify: `api/model_descriptors_public.cpp`
 - Modify: LFM2/SigLIP config resources as needed under `src/res/` or the model asset directory convention.
 
-- [ ] **Step 1: Write failing load test**
+- [x] **Step 1: Write failing load test**
 
 Call `loadMultimodalCompositionJson()` with `lfm2-siglip`, all CPU.
 
 Expected initial result: FAIL with unsupported or missing loader.
 
-- [ ] **Step 2: Load LLM component**
+- [x] **Step 2: Load LLM component**
 
 Load `lfm2-siglip-llm` with backend CPU and role `TEXT_LLM`.
 
-- [ ] **Step 3: Load vision component**
+- [x] **Step 3: Load vision component**
 
 Load `siglip-lfm2-vision` with backend CPU and role `VISION_ENCODER`.
 
-- [ ] **Step 4: Load connector component**
+- [x] **Step 4: Load connector component**
 
 Load `lfm2-siglip-connector` as connector adapter.
 
-- [ ] **Step 5: Run single-image prompt**
+- [x] **Step 5: Run single-image prompt**
 
 Use `runMultimodalHandleWithMessagesStreaming()` with one preprocessed image and one text prompt.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 Run:
 
@@ -577,7 +577,16 @@ export NDK_ROOT=/path/to/android-ndk
 ```
 
 Progress:
-- 2026-06-08: Pending.
+- 2026-06-08: Added `scripts/check_lfm2_siglip_composition_load_contract.sh`. RED confirmed with `FAIL: LFM2+SigLIP composition loader helper is missing`.
+- 2026-06-08: Added descriptor-key-based component loading for composition parts.
+- 2026-06-08: Added `load_lfm2_siglip_composition_handle()` to load CPU LFM2 LLM, CPU SigLIP vision, and CPU LFM2 connector into one role-tagged handle.
+- 2026-06-08: Added shared `move_first_loaded_component()` helper for role-tagged handle composition.
+- 2026-06-08: Added `Lfm2VlVisionTransformer::run_image()` and routed API multimodal execution through connector projection when a connector is present.
+- 2026-06-08: Removed the `ENABLE_QNN` gate from generic multimodal run paths so CPU compositions can execute.
+- 2026-06-08: GREEN confirmed for `bash scripts/check_lfm2_siglip_composition_load_contract.sh`; with an empty model base the valid composition reached the real load path and returned `CAUSAL_LM_ERROR_MODEL_LOAD_FAILED` instead of `CAUSAL_LM_ERROR_UNSUPPORTED`.
+- 2026-06-08: Full single-image prompt smoke was not run because no LFM2/SigLIP model asset directory is present in the workspace; run-path source and load-path smoke are verified.
+- 2026-06-08: Native verification passed with `./build.sh --target=api`.
+- 2026-06-08: Android/QNN verification passed with `./build.sh --platform=android --enable-qnn --target=api`.
 
 ---
 
