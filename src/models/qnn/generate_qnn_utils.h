@@ -93,6 +93,26 @@ void fill_generation_inputs(
   const uint16_t *swa_position_ids_cos, const uint16_t *swa_position_ids_sin,
   int swa_pos_dim, int position, int rope_cache_seq_len);
 
+
+/**
+ * Fast path for autoregressive generation when attention-mask buffers have
+ * already been cleared for the run and `position` is monotonically increasing.
+ * It updates only the newly-visible prefix slot plus RoPE slices instead of
+ * rewriting the whole mask every token.
+ */
+void fill_generation_inputs_incremental(
+  float *generation_sample, int current_token,
+  uint16_t *generation_attention_mask, int generation_attention_mask_elements,
+  uint16_t *generation_sliding_attention_mask,
+  int generation_sliding_attention_mask_elements,
+  int generation_full_kv_past_length, int generation_sliding_kv_past_length,
+  uint16_t *generation_position_ids_cos, uint16_t *generation_position_ids_sin,
+  const uint16_t *position_ids_cos, const uint16_t *position_ids_sin,
+  int pos_dim, uint16_t *generation_swa_position_ids_cos,
+  uint16_t *generation_swa_position_ids_sin,
+  const uint16_t *swa_position_ids_cos, const uint16_t *swa_position_ids_sin,
+  int swa_pos_dim, int position, int rope_cache_seq_len);
+
 void fill_generation_inputs_u16(
   uint16_t *generation_attention_mask, int generation_attention_mask_elements,
   uint16_t *generation_sliding_attention_mask,

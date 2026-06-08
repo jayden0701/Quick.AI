@@ -378,6 +378,51 @@ void fill_generation_inputs(
     rope_cache_seq_len);
 }
 
+void fill_generation_inputs_incremental(
+  float *generation_sample, int current_token,
+  uint16_t *generation_attention_mask, int generation_attention_mask_elements,
+  uint16_t *generation_sliding_attention_mask,
+  int generation_sliding_attention_mask_elements,
+  int generation_full_kv_past_length, int generation_sliding_kv_past_length,
+  uint16_t *generation_position_ids_cos, uint16_t *generation_position_ids_sin,
+  const uint16_t *position_ids_cos, const uint16_t *position_ids_sin,
+  int pos_dim, uint16_t *generation_swa_position_ids_cos,
+  uint16_t *generation_swa_position_ids_sin,
+  const uint16_t *swa_position_ids_cos, const uint16_t *swa_position_ids_sin,
+  int swa_pos_dim, int position, int rope_cache_seq_len) {
+  if (position < 0 || position >= rope_cache_seq_len) {
+    throw std::runtime_error("Generation position is out of rope cache");
+  }
+
+  generation_sample[0] = current_token;
+
+  const uint16_t visible = std::numeric_limits<uint16_t>::max();
+  generation_attention_mask[generation_attention_mask_elements - 1] = visible;
+  generation_sliding_attention_mask[generation_sliding_attention_mask_elements -
+                                    1] = visible;
+
+  const int newly_visible = position - 1;
+  if (newly_visible >= 0 && newly_visible < generation_full_kv_past_length) {
+    generation_attention_mask[newly_visible] = visible;
+  }
+  if (newly_visible >= 0 && newly_visible < generation_sliding_kv_past_length) {
+    generation_sliding_attention_mask[newly_visible] = visible;
+  }
+
+  std::memcpy(generation_position_ids_cos,
+              position_ids_cos + position * pos_dim,
+              pos_dim * sizeof(uint16_t));
+  std::memcpy(generation_position_ids_sin,
+              position_ids_sin + position * pos_dim,
+              pos_dim * sizeof(uint16_t));
+  std::memcpy(generation_swa_position_ids_cos,
+              swa_position_ids_cos + position * swa_pos_dim,
+              swa_pos_dim * sizeof(uint16_t));
+  std::memcpy(generation_swa_position_ids_sin,
+              swa_position_ids_sin + position * swa_pos_dim,
+              swa_pos_dim * sizeof(uint16_t));
+}
+
 void fill_generation_inputs_u16(
   uint16_t *generation_attention_mask, int generation_attention_mask_elements,
   uint16_t *generation_sliding_attention_mask,
@@ -404,104 +449,95 @@ int sample(uint16_t *pointer, int length, int *tokens, int number_of_tokens,
            float logit_scale, int logit_offset, float repetition_penalty,
            float temperature, float top_p, int top_k,
            float final_logit_softcapping) {
-  // Priority queue!
-  std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>,
-                      std::greater<std::pair<int, int>>>
-    top_k_elements;
-  for (int i = 0; i < top_k && i < length; i++) {
-    top_k_elements.push(std::make_pair(pointer[i], i));
-  }
-  for (int i = top_k; i < length; i++) {
-    if (top_k_elements.top().first < pointer[i]) {
-      top_k_elements.pop();
-      top_k_elements.push(std::make_pair(pointer[i], i));
+  if (pointer == nullptr || length <= 0)
+    return 0;
+
+  const int candidate_limit =
+    (top_k > 0) ? std::min(top_k, length) : length;
+
+  // Keep only the largest raw logits. Reuse thread-local buffers so the
+  // per-token sampling path does not allocate on every decode step.
+  using RawCandidate = std::pair<int, int>; // raw qlogit, token id
+  thread_local std::vector<RawCandidate> heap;
+  thread_local std::vector<std::pair<int, float>> candidates;
+  thread_local std::vector<float> weights;
+  heap.clear();
+  candidates.clear();
+  weights.clear();
+  heap.reserve(candidate_limit);
+  candidates.reserve(candidate_limit);
+  weights.reserve(candidate_limit);
+
+  const auto min_heap_cmp = [](const RawCandidate &a,
+                               const RawCandidate &b) {
+    return a.first > b.first;
+  };
+
+  for (int i = 0; i < candidate_limit; ++i)
+    heap.emplace_back(pointer[i], i);
+  std::make_heap(heap.begin(), heap.end(), min_heap_cmp);
+
+  for (int i = candidate_limit; i < length; ++i) {
+    if (heap.front().first < pointer[i]) {
+      std::pop_heap(heap.begin(), heap.end(), min_heap_cmp);
+      heap.back() = {pointer[i], i};
+      std::push_heap(heap.begin(), heap.end(), min_heap_cmp);
     }
   }
-  length = top_k_elements.size();
 
-  // Convert to float, dequant, then apply Gemma final-logit soft-cap.
-  // Soft-cap: l = soft_cap * tanh(l / soft_cap). Without it, a few raw
-  // logits dominate softmax and the model collapses into repetition.
-  std::vector<int> indices(length);
-  std::vector<float> logits(length);
   const bool use_softcap = final_logit_softcapping > 0.0f;
   const float inv_softcap = use_softcap ? 1.0f / final_logit_softcapping : 0.0f;
-  for (int i = 0; i < length; i++) {
-    auto element = top_k_elements.top();
-    float l = (1.0f * element.first + logit_offset) * logit_scale;
-    if (use_softcap) {
-      l = final_logit_softcapping * std::tanh(l * inv_softcap);
-    }
-    logits[i] = l;
-    indices[i] = element.second;
-    top_k_elements.pop();
+  const bool use_temperature = temperature > 1e-5f;
+  const float inv_temperature = use_temperature ? 1.0f / temperature : 1.0f;
+
+  for (const auto &element : heap) {
+    float logit = (static_cast<float>(element.first) + logit_offset) * logit_scale;
+    if (use_softcap)
+      logit = final_logit_softcapping * std::tanh(logit * inv_softcap);
+    if (use_temperature)
+      logit *= inv_temperature;
+    candidates.emplace_back(element.second, logit);
   }
 
-  for (unsigned int i = 0; i < number_of_tokens; ++i) {
-    const int t = tokens[i];
-    for (int j = 0; j < length; ++j) {
-      if (indices[j] == tokens[i]) {
-        if (logits[j] > 0.0f)
-          logits[j] /= repetition_penalty;
+  if (repetition_penalty != 1.0f) {
+    for (int i = 0; i < number_of_tokens; ++i) {
+      const int token_id = tokens[i];
+      for (auto &candidate : candidates) {
+        if (candidate.first != token_id)
+          continue;
+        if (candidate.second > 0.0f)
+          candidate.second /= repetition_penalty;
         else
-          logits[j] *= repetition_penalty;
+          candidate.second *= repetition_penalty;
         break;
       }
     }
   }
 
-  std::vector<std::pair<int, float>> top_indices_and_logits(length);
-  for (int i = 0; i < length; ++i) {
-    if (temperature > 1e-5)
-      logits[i] = logits[i] / temperature;
-    top_indices_and_logits[i] = {i, logits[i]};
-  }
-  sort(top_indices_and_logits.begin(), top_indices_and_logits.end(),
-       [](auto &a, auto &b) { return a.second > b.second; });
+  std::sort(candidates.begin(), candidates.end(),
+            [](const auto &a, const auto &b) { return a.second > b.second; });
 
-  const float max_logit = top_indices_and_logits[0].second;
-  std::vector<float> probs(length);
+  const float max_logit = candidates.front().second;
   float sum_exp = 0.0f;
-  for (int i = 0; i < length; ++i) {
-    probs[i] = std::exp(top_indices_and_logits[i].second - max_logit);
-    sum_exp += probs[i];
+  weights.resize(candidates.size());
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    weights[i] = std::exp(candidates[i].second - max_logit);
+    sum_exp += weights[i];
   }
   if (sum_exp <= 0.0f)
     sum_exp = 1.0f;
-  for (int i = 0; i < length; ++i) {
-    probs[i] /= sum_exp;
-  }
 
-  float cum_prob = 0.0f;
-  unsigned int top_index = 0;
-  while (top_index < (unsigned)length && cum_prob < top_p) {
-    cum_prob += probs[top_index];
-    ++top_index;
+  float cumulative_prob = 0.0f;
+  size_t nucleus_size = 0;
+  const float nucleus_threshold = (top_p > 0.0f && top_p < 1.0f) ? top_p : 1.0f;
+  while (nucleus_size < weights.size() && cumulative_prob < nucleus_threshold) {
+    cumulative_prob += weights[nucleus_size] / sum_exp;
+    ++nucleus_size;
   }
-  if (top_index == 0)
-    top_index = 1;
+  if (nucleus_size == 0)
+    nucleus_size = 1;
 
-  // Apply Top-P: nuke beyond top_index
-  for (int i = 0; i < length; ++i)
-    logits[i] = -INFINITY;
-  for (unsigned int i = 0; i < top_index; ++i) {
-    logits[top_indices_and_logits[i].first] = top_indices_and_logits[i].second;
-  }
-
-  // Final softmax for sampling
-  const float final_max = top_indices_and_logits[0].second;
-  float final_sum_exp = 0.0f;
-  for (int i = 0; i < length; ++i) {
-    float ex = std::exp(logits[i] - final_max);
-    final_sum_exp += ex;
-    logits[i] = ex;
-  }
-  if (final_sum_exp <= 0.0f)
-    final_sum_exp = 1.0f;
-  for (int i = 0; i < length; ++i)
-    logits[i] /= final_sum_exp;
-
-  // Sample
-  std::discrete_distribution<int> dist(logits.data(), logits.data() + length);
-  return indices[dist(rng)];
+  weights.resize(nucleus_size);
+  std::discrete_distribution<int> dist(weights.begin(), weights.end());
+  return candidates[dist(rng)].first;
 }
