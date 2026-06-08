@@ -75,20 +75,30 @@ using causallm::multimodal_pointer;
 /**
  * @brief Per-handle state for a loaded CausalLM model instance.
  *
- * Each handle may carry one or more sub-models so that compositions like
- * vision-encoder + LLM can live behind a single handle. The vectors are
- * kept parallel: models[i] ↔ architectures[i] ↔ model_dirs[i] ↔
- * initialization_duration_ms[i]. The single-model API paths
- * (runModelHandleWithMessages / runModelHandleStreaming) operate on models[0]
- * and ignore the rest; the multimodal API drives the full set.
+ * Each handle may carry one or more role-tagged sub-components so that
+ * compositions like vision-encoder + LLM can live behind a single handle.
+ * components owns the model instances; models / architectures / model_dirs /
+ * initialization_duration_ms are temporary compatibility mirrors for legacy
+ * call sites while the API migrates to role-based lookup.
  *
  * Note: the legacy non-handle API (loadModel / ...) is
  * implemented on top of a single static "default" instance of this struct
  * so that existing callers (e.g. test_api) keep working unchanged.
  */
+struct LoadedComponent {
+  ModelRole role = QDA_ROLE_UNKNOWN;
+  std::string id;
+  BackendType backend = CAUSAL_LM_BACKEND_CPU;
+  std::unique_ptr<causallm::Transformer> model;
+  std::string architecture;
+  std::string model_dir;
+  double initialization_duration_ms = 0.0;
+};
+
 struct CausalLmModel {
   std::mutex mtx;
-  std::vector<std::unique_ptr<causallm::Transformer>> models;
+  std::vector<LoadedComponent> components;
+  std::vector<causallm::Transformer *> models;
   std::vector<std::string> architectures;
   std::vector<std::string> model_dirs;
   std::string last_output;
@@ -112,6 +122,52 @@ static std::string g_chat_template_name = "default";
 static CausalLmModel &get_default_handle() {
   static CausalLmModel instance;
   return instance;
+}
+
+static void clear_loaded_components(CausalLmModel &h) {
+  h.models.clear();
+  h.architectures.clear();
+  h.model_dirs.clear();
+  h.initialization_duration_ms.clear();
+  h.components.clear();
+}
+
+static causallm::Transformer *
+append_loaded_component(CausalLmModel &h, LoadedComponent component) {
+  causallm::Transformer *model = component.model.get();
+  h.components.push_back(std::move(component));
+  h.models.push_back(model);
+  h.architectures.push_back(h.components.back().architecture);
+  h.model_dirs.push_back(h.components.back().model_dir);
+  h.initialization_duration_ms.push_back(
+    h.components.back().initialization_duration_ms);
+  return model;
+}
+
+static std::optional<size_t> find_component_index(const CausalLmModel &h,
+                                                  ModelRole role) {
+  for (size_t i = 0; i < h.components.size(); ++i) {
+    if (h.components[i].role == role && h.components[i].model) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+static causallm::Transformer *find_component(CausalLmModel &h,
+                                             ModelRole role) {
+  auto idx = find_component_index(h, role);
+  if (!idx)
+    return nullptr;
+  return h.components[*idx].model.get();
+}
+
+static causallm::Transformer *find_text_llm(CausalLmModel &h) {
+  return find_component(h, QDA_ROLE_TEXT_LLM);
+}
+
+static causallm::Transformer *find_vision_encoder(CausalLmModel &h) {
+  return find_component(h, QDA_ROLE_VISION_ENCODER);
 }
 
 static std::map<std::string, std::string> g_model_path_map = {
@@ -568,8 +624,10 @@ static std::string apply_chat_template(const std::string &architecture,
 }
 
 static size_t text_generation_model_index(const CausalLmModel &h) {
-  // Convention: a multi-model handle is [vision producer, text LLM, ...];
-  // text generation runs on the LLM at index 1.
+  if (auto idx = find_component_index(h, QDA_ROLE_TEXT_LLM)) {
+    return *idx;
+  }
+  // Legacy fallback: a multi-model handle used to be [vision producer, LLM].
   return (h.models.size() > 1) ? 1 : 0;
 }
 
@@ -592,13 +650,13 @@ static void update_handle_session_after_run(CausalLmModel &h,
   const auto *cb = ModelCallbackRegistry::instance().lookup(h.architectures[model_index]);
   if (!cb || !cb->read_kv_len)
     return;
-  h.kv_len = cb->read_kv_len(h.models[model_index].get());
+  h.kv_len = cb->read_kv_len(h.models[model_index]);
 }
 
 #ifdef ENABLE_QNN
 static causallm::Quick_Dot_AI_QNN *find_qnn_kv_cache_model(CausalLmModel &h) {
   for (auto &m : h.models) {
-    auto *q = dynamic_cast<causallm::Quick_Dot_AI_QNN *>(m.get());
+    auto *q = dynamic_cast<causallm::Quick_Dot_AI_QNN *>(m);
     if (q && q->supportsKvCachePersistence()) return q;
   }
   return nullptr;
@@ -1007,10 +1065,7 @@ static ErrorCode load_into_handle(CausalLmModel &h, BackendType compute,
 
   std::lock_guard<std::mutex> lock(h.mtx);
   try {
-    h.models.clear();
-    h.architectures.clear();
-    h.model_dirs.clear();
-    h.initialization_duration_ms.clear();
+    clear_loaded_components(h);
     h.initialized = false;
     reset_handle_session_state(h);
 
@@ -1290,10 +1345,15 @@ static ErrorCode load_into_handle(CausalLmModel &h, BackendType compute,
                             sub_t1 - sub_t0)
                             .count();
 
-          h.models.push_back(std::move(m));
-          h.architectures.push_back(arch_i);
-          h.model_dirs.push_back(sub_dir);
-          h.initialization_duration_ms.push_back(sub_ms);
+          LoadedComponent component;
+          component.role = QDA_ROLE_UNKNOWN;
+          component.id = dirs[i];
+          component.backend = compute;
+          component.model = std::move(m);
+          component.architecture = arch_i;
+          component.model_dir = sub_dir;
+          component.initialization_duration_ms = sub_ms;
+          append_loaded_component(h, std::move(component));
           LOGD("[DEBUG]   [%zu] loaded (%.1f ms)", i, sub_ms);
 
           // Load chat template from model directory if available.
@@ -1459,11 +1519,16 @@ static ErrorCode load_into_handle(CausalLmModel &h, BackendType compute,
     auto init_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
       finish_init - start_init);
 
-    h.models.push_back(std::move(m));
-    h.architectures.push_back(architecture);
-    h.model_dirs.push_back(abs_model_dir);
-    h.initialization_duration_ms.push_back(
-      static_cast<double>(init_duration.count()));
+    LoadedComponent component;
+    component.role = QDA_ROLE_UNKNOWN;
+    component.id = target_model_name ? target_model_name : "";
+    component.backend = compute;
+    component.model = std::move(m);
+    component.architecture = architecture;
+    component.model_dir = abs_model_dir;
+    component.initialization_duration_ms =
+      static_cast<double>(init_duration.count());
+    append_loaded_component(h, std::move(component));
     h.initialized = true;
 
     // XGrammarManager Initalize
@@ -1594,7 +1659,7 @@ static ErrorCode metrics_on_handle(CausalLmModel &h,
   }
 
   try {
-    auto *model = h.models[metrics_model_idx].get();
+    auto *model = h.models[metrics_model_idx];
     if (!model->hasRun()) {
       return CAUSAL_LM_ERROR_INFERENCE_NOT_RUN;
     }
@@ -2016,6 +2081,11 @@ ErrorCode loadModelHandleByName(BackendType compute, const char *model_id,
     *out_handle = nullptr;
     return ec;
   }
+  if (!h->components.empty()) {
+    h->components[0].id = d.id ? d.id : "";
+    h->components[0].role = d.role;
+    h->components[0].backend = compute;
+  }
   *out_handle = h;
   return CAUSAL_LM_ERROR_NONE;
 }
@@ -2076,18 +2146,24 @@ ErrorCode loadMultimodalHandleByName(BackendType compute,
   if (!h)
     return CAUSAL_LM_ERROR_UNKNOWN;
 
-  auto move_one = [](CausalLmModel &src, CausalLmModel &dst) {
-    dst.models.push_back(std::move(src.models[0]));
-    dst.architectures.push_back(src.architectures.empty() ? std::string()
-                                                          : src.architectures[0]);
-    dst.model_dirs.push_back(src.model_dirs.empty() ? std::string()
-                                                    : src.model_dirs[0]);
-    if (!src.initialization_duration_ms.empty())
-      dst.initialization_duration_ms.push_back(
-        src.initialization_duration_ms[0]);
+  auto move_one = [](CausalLmModel &src, CausalLmModel &dst, ModelRole role,
+                     const char *id, BackendType backend) -> bool {
+    if (src.components.empty() || !src.components[0].model)
+      return false;
+    LoadedComponent component = std::move(src.components[0]);
+    component.role = role;
+    component.id = id ? id : "";
+    component.backend = backend;
+    append_loaded_component(dst, std::move(component));
+    clear_loaded_components(src);
+    return true;
   };
-  move_one(tmp_vision, *h); // index 0 = vision producer
-  move_one(tmp_llm, *h);    // index 1 = LLM consumer
+  if (!move_one(tmp_vision, *h, QDA_ROLE_VISION_ENCODER, embedding_model_id,
+                compute) ||
+      !move_one(tmp_llm, *h, QDA_ROLE_TEXT_LLM, llm_model_id, compute)) {
+    delete h;
+    return CAUSAL_LM_ERROR_MODEL_LOAD_FAILED;
+  }
   if (native_lib_dir != nullptr)
     h->native_lib_dir = native_lib_dir;
   h->initialized = true;
@@ -2208,7 +2284,7 @@ static ErrorCode run_model_streaming_on_handle(CausalLmModel &h,
   if (model_index >= h.models.size() || !h.models[model_index]) {
     return CAUSAL_LM_ERROR_NOT_INITIALIZED;
   }
-  auto *m = h.models[model_index].get();
+  auto *m = h.models[model_index];
 
   CallbackStreamer streamer;
   callback_streamer_init(&streamer, callback, user_data);
@@ -2332,8 +2408,7 @@ ErrorCode encodeModelHandle(CausalLmHandle handle, const char *text,
   }
 
   // Embedding models occupy models[0] (single-model embedding handle).
-  auto *st =
-    dynamic_cast<causallm::SentenceTransformer *>(h.models[0].get());
+  auto *st = dynamic_cast<causallm::SentenceTransformer *>(h.models[0]);
   if (st == nullptr) {
     LOGE("encodeModelHandle: models[0] is not a SentenceTransformer");
     return CAUSAL_LM_ERROR_UNSUPPORTED;
@@ -2383,10 +2458,7 @@ ErrorCode unloadModelHandle(CausalLmHandle handle) {
     return CAUSAL_LM_ERROR_NONE;
   }
   std::lock_guard<std::mutex> lock(handle->mtx);
-  handle->models.clear();
-  handle->architectures.clear();
-  handle->model_dirs.clear();
-  handle->initialization_duration_ms.clear();
+  clear_loaded_components(*handle);
   handle->initialized = false;
   reset_handle_session_state(*handle);
   return CAUSAL_LM_ERROR_NONE;
@@ -2402,10 +2474,7 @@ ErrorCode destroyModelHandle(CausalLmHandle handle) {
   // freed memory after this point — documented as "valid until destroy".
   {
     std::lock_guard<std::mutex> lock(handle->mtx);
-    handle->models.clear();
-    handle->architectures.clear();
-    handle->model_dirs.clear();
-    handle->initialization_duration_ms.clear();
+    clear_loaded_components(*handle);
     handle->initialized = false;
     reset_handle_session_state(*handle);
   }
@@ -2569,8 +2638,12 @@ run_vision_encoder(CausalLmModel &h, const char *prompt,
                    const float *pixelValues, int numPatches,
                    int originalHeight, int originalWidth) {
   const int PATCH_SIZE = 512; // pixel layout: numPatches*3*512*512 floats
-  causallm::Transformer *vision = h.models[0].get();
-  causallm::Transformer *llm = h.models[1].get();
+  causallm::Transformer *vision = find_vision_encoder(h);
+  causallm::Transformer *llm = find_text_llm(h);
+  if (vision == nullptr || llm == nullptr) {
+    LOGE("[MM] role lookup failed for vision encoder or text LLM");
+    return {nullptr, 0};
+  }
 
   auto info = llm->get_embedding_info();
   vision->set_quant_param(info.first, info.second);
@@ -2616,13 +2689,13 @@ ErrorCode runMultimodalHandleStreaming(CausalLmHandle handle,
     return CAUSAL_LM_ERROR_NOT_INITIALIZED;
   }
 
-  // Multimodal expects the handle to be loaded from a multi-model
-  // nntr_config.json (architectures[] + model_dirs[]) with at least
-  // [vision_encoder, llm]. A single-model handle cannot drive this path.
-  if (h.models.size() < 2) {
-    LOGE("[DEBUG] runMultimodalHandleStreaming: need >=2 sub-models "
-         "(got %zu). Load with multi-model nntr_config.json.",
-         h.models.size());
+  const auto llm_index = find_component_index(h, QDA_ROLE_TEXT_LLM);
+  auto *llm = find_text_llm(h);
+  auto *vision = find_vision_encoder(h);
+  if (!llm_index || llm == nullptr || vision == nullptr) {
+    LOGE("[DEBUG] runMultimodalHandleStreaming: missing role components "
+         "(vision=%p llm=%p)",
+         (void *)vision, (void *)llm);
     return CAUSAL_LM_ERROR_UNSUPPORTED;
   }
 
@@ -2655,17 +2728,20 @@ ErrorCode runMultimodalHandleStreaming(CausalLmHandle handle,
     LOGE("[DEBUG] runMultimodalHandleStreaming: vision threw: %s", e.what());
     return CAUSAL_LM_ERROR_INFERENCE_FAILED;
   }
+  if (image_embeds.first == nullptr || image_embeds.second == 0) {
+    LOGE("[DEBUG] runMultimodalHandleStreaming: vision produced no embeddings");
+    return CAUSAL_LM_ERROR_UNSUPPORTED;
+  }
 
   const std::string raw_input(prompt);
   const bool input_already_formatted =
     raw_input.find("<|turn_start|>") != std::string::npos ||
     raw_input.find("<|im_start|>") != std::string::npos ||
     raw_input.find("<start_of_turn>") != std::string::npos;
-  std::string input =
-    prepare_input_for_model(h, 1, raw_input, input_already_formatted);
+  std::string input = prepare_input_for_model(h, *llm_index, raw_input,
+                                              input_already_formatted);
 
-  return execute_multimodal(h, h.models[1].get(), image_embeds, input,
-                            callback, user_data);
+  return execute_multimodal(h, llm, image_embeds, input, callback, user_data);
 #else
   LOGE("[DEBUG] runMultimodalHandleStreaming: built without ENABLE_QNN");
   return CAUSAL_LM_ERROR_UNSUPPORTED;
@@ -2704,10 +2780,13 @@ ErrorCode runMultimodalHandleWithMessages(
     return CAUSAL_LM_ERROR_NOT_INITIALIZED;
   }
 
-  if (h.models.size() < 2) {
-    LOGE(
-      "[DEBUG] runMultimodalHandleWithMessages: need >=2 sub-models (got %zu)",
-      h.models.size());
+  const auto llm_index = find_component_index(h, QDA_ROLE_TEXT_LLM);
+  auto *llm = find_text_llm(h);
+  auto *vision = find_vision_encoder(h);
+  if (!llm_index || llm == nullptr || vision == nullptr) {
+    LOGE("[DEBUG] runMultimodalHandleWithMessages: missing role components "
+         "(vision=%p llm=%p)",
+         (void *)vision, (void *)llm);
     *outputText = nullptr;
     return CAUSAL_LM_ERROR_UNSUPPORTED;
   }
@@ -2721,12 +2800,11 @@ ErrorCode runMultimodalHandleWithMessages(
 
   // Apply chat template
   auto chat_messages = convertMessages(messages, num_messages);
-  const size_t llm_index = h.architectures.size() > 1 ? 1 : 0;
-  std::string arch = h.architectures.size() > llm_index
-                       ? h.architectures[llm_index]
+  std::string arch = h.architectures.size() > *llm_index
+                       ? h.architectures[*llm_index]
                        : std::string();
   std::string model_dir =
-    h.model_dirs.size() > llm_index ? h.model_dirs[llm_index] : std::string();
+    h.model_dirs.size() > *llm_index ? h.model_dirs[*llm_index] : std::string();
   std::string prompt = apply_chat_template_messages(
     arch, chat_messages, add_generation_prompt, model_dir);
   LOGD("[DEBUG]   formatted prompt length: %zu", prompt.length());
@@ -2755,6 +2833,12 @@ ErrorCode runMultimodalHandleWithMessages(
     *outputText = nullptr;
     return CAUSAL_LM_ERROR_INFERENCE_FAILED;
   }
+  if (image_embeds.first == nullptr || image_embeds.second == 0) {
+    LOGE("[DEBUG] runMultimodalHandleWithMessages: vision produced no "
+         "embeddings");
+    *outputText = nullptr;
+    return CAUSAL_LM_ERROR_UNSUPPORTED;
+  }
 
   h.last_output.clear();
   auto accumulate_cb = [](const char *delta, void *ud) -> int {
@@ -2762,8 +2846,9 @@ ErrorCode runMultimodalHandleWithMessages(
       static_cast<std::string *>(ud)->append(delta);
     return 0;
   };
-  ErrorCode ec = execute_multimodal(h, h.models[1].get(), image_embeds, prompt,
-                                    accumulate_cb, &h.last_output);
+  ErrorCode ec =
+    execute_multimodal(h, llm, image_embeds, prompt, accumulate_cb,
+                       &h.last_output);
   if (ec != CAUSAL_LM_ERROR_NONE) {
     *outputText = nullptr;
     return ec;
@@ -2874,20 +2959,22 @@ ErrorCode runMultimodalHandleWithMessagesStreaming(
              "initialized for multimodal");
         return CAUSAL_LM_ERROR_NOT_INITIALIZED;
       }
-      if (h.models.size() < 2) {
+      const auto llm_index = find_component_index(h, QDA_ROLE_TEXT_LLM);
+      auto *llm = find_text_llm(h);
+      auto *vision = find_vision_encoder(h);
+      if (!llm_index || llm == nullptr || vision == nullptr) {
         LOGE("[DEBUG] runMultimodalHandleWithMessagesStreaming: need >=2 "
-             "sub-models (got %zu)",
-             h.models.size());
+             "role components (vision=%p llm=%p)",
+             (void *)vision, (void *)llm);
         return CAUSAL_LM_ERROR_UNSUPPORTED;
       }
 
       auto chat_messages = convertMessages(messages, num_messages);
-      const size_t llm_index = h.architectures.size() > 1 ? 1 : 0;
-      std::string arch = h.architectures.size() > llm_index
-                           ? h.architectures[llm_index]
+      std::string arch = h.architectures.size() > *llm_index
+                           ? h.architectures[*llm_index]
                            : std::string();
-      std::string model_dir = h.model_dirs.size() > llm_index
-                                ? h.model_dirs[llm_index]
+      std::string model_dir = h.model_dirs.size() > *llm_index
+                                ? h.model_dirs[*llm_index]
                                 : std::string();
       formattedInput = apply_chat_template_messages(
         arch, chat_messages, add_generation_prompt, model_dir);

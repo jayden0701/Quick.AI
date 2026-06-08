@@ -356,13 +356,13 @@ Progress:
 **Files:**
 - Modify: `api/quick_dot_ai_api.cpp`
 
-- [ ] **Step 1: Write failing internal behavior check**
+- [x] **Step 1: Write failing internal behavior check**
 
 Create a test/debug path that loads a fake or existing two-component handle and verifies that the text model is found by role, not by index.
 
 Expected initial result: FAIL because current helpers use fixed index convention.
 
-- [ ] **Step 2: Add role metadata to handle**
+- [x] **Step 2: Add role metadata to handle**
 
 Introduce:
 
@@ -380,7 +380,7 @@ struct LoadedComponent {
 
 Keep the existing vectors temporarily if needed for legacy APIs, but new composition code should use `components`.
 
-- [ ] **Step 3: Add lookup helpers**
+- [x] **Step 3: Add lookup helpers**
 
 ```cpp
 static causallm::Transformer *find_component(CausalLmModel &h, ModelRole role);
@@ -388,11 +388,11 @@ static causallm::Transformer *find_text_llm(CausalLmModel &h);
 static causallm::Transformer *find_vision_encoder(CausalLmModel &h);
 ```
 
-- [ ] **Step 4: Migrate multimodal path to role lookup**
+- [x] **Step 4: Migrate multimodal path to role lookup**
 
 Replace direct `h.models[0]` and `h.models[1]` usage in generic multimodal functions.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run:
 
@@ -401,7 +401,12 @@ Run:
 ```
 
 Progress:
-- 2026-06-08: Pending.
+- 2026-06-08: Added `scripts/check_multimodal_role_lookup_contract.sh`. RED confirmed with `FAIL: LoadedComponent struct is missing`.
+- 2026-06-08: Added `LoadedComponent` and `CausalLmModel.components`, with existing `models`, `architectures`, `model_dirs`, and `initialization_duration_ms` kept as compatibility mirrors.
+- 2026-06-08: Added role lookup helpers `find_component()`, `find_text_llm()`, and `find_vision_encoder()`.
+- 2026-06-08: Updated `loadMultimodalHandleByName()` to tag loaded vision and text components by role, and migrated generic multimodal paths to role lookup instead of direct `models[0]`/`models[1]` access.
+- 2026-06-08: GREEN confirmed for `bash scripts/check_multimodal_role_lookup_contract.sh` plus existing multimodal contract checks.
+- 2026-06-08: Native verification passed with `./build.sh --target=api` and Android/QNN compile verification passed with `./build.sh --platform=android --enable-qnn --target=api`.
 
 ---
 
