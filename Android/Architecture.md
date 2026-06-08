@@ -35,6 +35,8 @@ Key files:
 | `LiteRTLmChatSession.kt` | LiteRT-LM chat-session helper |
 | `ImageStore.kt` | Per-session image cache |
 | `LlavaNextImageProcessor.kt` | Native multimodal preprocessing helper |
+| `SigLipNaFlexImageProcessor.kt` | SigLIP/LFM2 fixed-size native preprocessing |
+| `JepaImageProcessor.kt` | JEPA/QNN native preprocessing |
 | `src/main/cpp/quickai_jni.cpp` | JNI bridge to `quick_dot_ai_api.h` |
 | `src/main/cpp/CMakeLists.txt` | Builds `libquickai_jni.so` and links `libquick_dot_ai_api.so` |
 
@@ -57,8 +59,14 @@ The preferred calls are handle-based:
 - `runModelHandleWithMessagesStreaming`
 - `runModelHandleWithJsonStreaming`
 - `runMultimodalHandleStreaming`
+- `loadMultimodalCompositionJsonNative`
 - `cancelModelHandle`
 - `destroyModelHandle`
+
+For descriptor-driven multimodal composition requests, `NativeQuickDotAI`
+builds JSON from the `LoadModelRequest` composition fields and calls
+`loadMultimodalCompositionJsonNative`, which forwards to the C API entry point
+`loadMultimodalCompositionJson()`.
 
 ## ModelCatalog
 
@@ -77,8 +85,9 @@ merged in at the Kotlin layer.
 | Type | Role |
 |---|---|
 | `enum class RuntimeKind { NATIVE, LITERT }` | Selects the engine path |
-| `enum class Capability { STREAMING, MESSAGES_API, MULTIMODAL, TOOL_USE, EMBEDDING, MULTI_IMAGE }` | Per-model feature flags |
-| `data class ModelDescriptor(id, family, displayName, runtime, backends, capabilities)` | Descriptor from the catalog |
+| `enum class Capability { STREAMING, MESSAGES_API, MULTIMODAL, TOOL_USE, EMBEDDING, MULTI_IMAGE, VISION_ENCODER }` | Per-model feature flags |
+| `enum class ModelRole { UNKNOWN, TEXT_LLM, VISION_ENCODER, CONNECTOR, COMPOSITION }` | Component/composition role |
+| `data class ModelDescriptor(id, family, displayName, runtime, backends, capabilities, role, embeddingDim, compatibleWith)` | Descriptor from the catalog |
 | `object ModelIds` | String constants for well-known model ids |
 | `object ModelCatalog` | Singleton: `all()`, `families()`, `selectable()`, `selectableFamilies()`, `runtimesFor(family)`, `backendsFor(family, rt)`, `resolve(family, rt, backend)`, `byId(id)` |
 
@@ -111,8 +120,27 @@ QuickDotAI.createEngine(context, descriptor: ModelDescriptor): QuickDotAI
 ### LoadModelRequest
 
 `LoadModelRequest.modelId` is a `String` catalog id. The cache key is
-`"$modelId:${quantization.name}"`. The JNI call dispatched on load is
-`loadModelHandleByNameNative`.
+`"$modelId:${quantization.name}"` for legacy single-model loads. For
+composition loads, the key includes `compositionId`, `llmModelId`,
+`llmBackend`, `visionModelId`, `visionBackend`, `connectorModelId`,
+`connectorBackend`, and quantization so one process cannot accidentally reuse a
+handle loaded with a different component/backend tuple.
+
+The composition fields are:
+
+```kotlin
+compositionId
+llmModelId
+llmBackend
+visionModelId
+visionBackend
+connectorModelId
+connectorBackend
+```
+
+When `compositionId` is null, `NativeQuickDotAI.load()` dispatches
+`loadModelHandleByNameNative`. When `compositionId` is set, it dispatches
+`loadMultimodalCompositionJsonNative`.
 
 ## 🌗 LiteRT Runtime Path
 

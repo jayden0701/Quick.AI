@@ -722,11 +722,11 @@ Progress:
 - Modify: `Android/QuickDotAI/README.md`
 - Modify: `Android/Architecture.md`
 
-- [ ] **Step 1: Document component catalog**
+- [x] **Step 1: Document component catalog**
 
 Explain model roles, composition ids, backend selection, and pair-specific weights.
 
-- [ ] **Step 2: Document Android usage**
+- [x] **Step 2: Document Android usage**
 
 Show Kotlin examples for:
 
@@ -743,7 +743,7 @@ LoadModelRequest(
 )
 ```
 
-- [ ] **Step 3: Run final checks**
+- [x] **Step 3: Run final checks**
 
 Run:
 
@@ -760,7 +760,13 @@ If Android device and NDK/QNN are available:
 ```
 
 Progress:
-- 2026-06-08: Pending.
+- 2026-06-08: Added `scripts/check_multimodal_composition_docs_contract.sh`. RED confirmed with `FAIL: C API docs do not describe model roles`.
+- 2026-06-08: Documented catalog roles, composition ids, backend selection, pair-specific weights, and `loadMultimodalCompositionJson()` JSON examples.
+- 2026-06-08: Documented Android composition fields, LFM2+JEPA Kotlin usage, SigLIP/JEPA processor selection, and JNI architecture flow.
+- 2026-06-08: Final verification passed with `./build.sh --target=api`.
+- 2026-06-08: Final verification passed with `cd Android && ./gradlew :QuickDotAI:compileDebugKotlin :SampleTestAPP:compileDebugKotlin`.
+- 2026-06-08: Final verification passed with `./build.sh --platform=android --enable-qnn --target=api`.
+- 2026-06-08: Initial `./apk-build-install.sh` install failed because an existing `com.example.sampletestapp` install on SM-S948U had an incompatible signature. Removed that package for user 0, reran installation, and final verification passed with `./apk-build-install.sh`; it installed on SM-S948U and SM-S918N and skipped SM-N986N because API 30 is below minSdk 33.
 
 ---
 

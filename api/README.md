@@ -92,8 +92,28 @@ typedef struct {
   uint32_t    capabilities;
   const char *config_name;
   const char *arch_string;
+  ModelRole   role;
+  unsigned int embedding_dim;
+  const char *compatible_with;
 } ModelDescriptor;
 ```
+
+### Descriptor roles and compositions
+
+Descriptors can represent a runnable model, a component, or a complete
+composition. Role summary: `TEXT_LLM` `VISION_ENCODER` `CONNECTOR` `COMPOSITION`.
+Component descriptors use `compatible_with` to
+declare legal pairings. Composition descriptors use the same field to list the
+required component ids. The pair-specific weights are represented as distinct model
+ids, for example `lfm2-siglip-llm` and `lfm2-jepa-llm`, so a loader never has
+to guess which LLM weights match a selected vision encoder.
+
+Current descriptor-driven multimodal compositions:
+
+| Composition | LLM | Vision | Connector | Backends |
+|---|---|---|---|---|
+| `lfm2-siglip` | `lfm2-siglip-llm` | `siglip-lfm2-vision` | `lfm2-siglip-connector` | CPU / CPU / CPU |
+| `lfm2-jepa` | `lfm2-jepa-llm` | `jepa-qnn-vision` | `lfm2-jepa-connector` | CPU / NPU / CPU |
 
 ## 🤖 Model Enums
 
@@ -269,6 +289,45 @@ int main() {
 ```
 
 ## 🖼️ Multimodal
+
+### Descriptor-driven composition load
+
+Use `loadMultimodalCompositionJson()` when the LLM, vision encoder, connector,
+or backend selection is component-specific.
+
+```c
+ErrorCode loadMultimodalCompositionJson(
+  const char *composition_json,
+  ModelQuantizationType quant_type,
+  const char *native_lib_dir,
+  const char *model_base_path,
+  CausalLmHandle *out_handle);
+```
+
+Example CPU composition:
+
+```json
+{
+  "id": "lfm2-siglip",
+  "llm": {"model_id": "lfm2-siglip-llm", "backend": "CPU"},
+  "vision": {"model_id": "siglip-lfm2-vision", "backend": "CPU"},
+  "connector": {"model_id": "lfm2-siglip-connector", "backend": "CPU"}
+}
+```
+
+Example mixed backend composition:
+
+```json
+{
+  "id": "lfm2-jepa",
+  "llm": {"model_id": "lfm2-jepa-llm", "backend": "CPU"},
+  "vision": {"model_id": "jepa-qnn-vision", "backend": "NPU"},
+  "connector": {"model_id": "lfm2-jepa-connector", "backend": "CPU"}
+}
+```
+
+The loader validates the top-level composition id, component roles,
+`compatible_with` metadata, and per-component backend support before loading.
 
 ```c
 ErrorCode runMultimodalHandleStreaming(

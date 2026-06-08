@@ -71,6 +71,7 @@ layout and the `register_model_descriptor` call convention.
 | Feature | Guide |
 |---|---|
 | Chat/OpenAI usage examples | [Chat and OpenAI Usage Examples](ChatAndOpenAIUsage.md) |
+| Multimodal Composition | [C API composition load](../api/README.md#descriptor-driven-composition-load) and [Android multimodal usage](../Android/QuickDotAI/README.md#-multimodal-usage) |
 | Structured output and tool calling | [XGrammar Reference](XGrammarReference.md) |
 | OpenAI JSON request streaming | [Chat and OpenAI Usage Examples](ChatAndOpenAIUsage.md) |
 | Chat templates | [Chat Templates](ChatTemplate.md) |

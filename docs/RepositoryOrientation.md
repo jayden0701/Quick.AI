@@ -48,6 +48,8 @@ C API, Quick.AI model extensions, QNN integration을 묶고 있고, 실제 추�
 | `Android/QuickDotAI/src/main/java/com/example/quickdotai/ModelCatalog.kt` | model descriptor catalog and selection |
 | `Android/QuickDotAI/src/main/java/com/example/quickdotai/NativeQuickDotAI.kt` | native backend wrapper |
 | `Android/QuickDotAI/src/main/java/com/example/quickdotai/NativeCausalLm.kt` | low-level JNI declarations |
+| `Android/QuickDotAI/src/main/java/com/example/quickdotai/SigLipNaFlexImageProcessor.kt` | SigLIP/LFM2 native preprocessing |
+| `Android/QuickDotAI/src/main/java/com/example/quickdotai/JepaImageProcessor.kt` | JEPA/QNN native preprocessing |
 | `Android/QuickDotAI/src/main/java/com/example/quickdotai/LiteRTLm.kt` | LiteRT-LM backend wrapper |
 | `Android/QuickDotAI/src/main/cpp/quickai_jni.cpp` | Kotlin/JNI bridge |
 | `Android/QuickDotAI/src/main/cpp/CMakeLists.txt` | builds `libquickai_jni.so` and links native libs |
@@ -86,12 +88,21 @@ SampleTestAPP
 | `runModelHandleWithMessagesStreaming()` | OpenAI-style messages streaming |
 | `runModelHandleWithJsonStreaming()` | OpenAI JSON request streaming |
 | `runMultimodalHandle*()` | multimodal-capable model path |
+| `loadMultimodalCompositionJson()` | descriptor-driven multimodal composition load |
 | `cancelModelHandle()` | cooperative cancellation |
 | `destroyModelHandle()` | handle release |
 
 `ModelCatalog.kt`는 JNI를 통해 native catalog를 읽고, Kotlin 계층에서 LiteRT
 descriptor를 병합한다. Android UI는 family/runtime/backend 3축으로 descriptor를
 선택한 뒤 `QuickDotAI.createEngine(context, descriptor)`로 engine을 만든다.
+
+Descriptor-driven multimodal composition is the current path for freely pairing
+component models. Catalog descriptors carry a role (`TEXT_LLM`,
+`VISION_ENCODER`, `CONNECTOR`, or `COMPOSITION`), an optional embedding
+dimension, and `compatible_with` metadata. The C API validates composition JSON
+such as `lfm2-siglip` or `lfm2-jepa` before loading the role-tagged components
+into one handle. Android exposes the same path through `LoadModelRequest`
+composition fields and `NativeCausalLm.loadMultimodalCompositionJsonNative()`.
 
 ## nntrainer 관계
 

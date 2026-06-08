@@ -107,8 +107,9 @@ End-to-end Chat tab and OpenAI tab examples live in
 ## 🖼️ Multimodal Usage
 
 LiteRT-LM multimodal usage requires `LoadModelRequest.visionBackend`.
-Native multimodal usage requires a native model handle whose config loads the
-expected vision encoder + LLM sub-models.
+Native multimodal usage can either load a legacy multimodal model id or a
+descriptor-driven composition with separate LLM, vision encoder, and connector
+components.
 
 ```kotlin
 engine.load(
@@ -134,6 +135,35 @@ engine.runMultimodalHandleWithMessagesStreaming(
 )
 ```
 
+For native LFM2 + JEPA, pass composition fields. `NativeQuickDotAI` serializes
+these fields into `loadMultimodalCompositionJsonNative`, and the C API validates
+the component roles, compatibility metadata, and per-component backends.
+
+```kotlin
+val descriptor = ModelCatalog.byId("lfm2-jepa") ?: return
+val engine = createEngine(applicationContext, descriptor)
+
+engine.load(
+    LoadModelRequest(
+        modelId = "lfm2-jepa",
+        compositionId = "lfm2-jepa",
+        llmModelId = "lfm2-jepa-llm",
+        llmBackend = BackendType.CPU,
+        visionModelId = "jepa-qnn-vision",
+        visionBackend = BackendType.NPU,
+        connectorModelId = "lfm2-jepa-connector",
+        connectorBackend = BackendType.CPU,
+        quantization = QuantizationType.W4A32,
+        nativeLibDir = applicationInfo.nativeLibraryDir,
+        modelBasePath = "/sdcard/Download/aistudio-mobile/models/"
+    )
+)
+```
+
+Processor selection follows the vision component id: `siglip-lfm2-vision` uses
+SigLipNaFlexImageProcessor and `jepa-qnn-vision` uses JepaImageProcessor.
+Other native multimodal ids fall back to the existing LLaVA-NeXT processor.
+
 ## 🧵 Chat Sessions
 
 Chat sessions keep backend-managed conversation state. Use
@@ -153,7 +183,13 @@ data class LoadModelRequest(
     val modelId: String,
     val quantization: QuantizationType = QuantizationType.W4A32,
     val modelPath: String? = null,
+    val compositionId: String? = null,
+    val llmModelId: String? = null,
+    val llmBackend: BackendType? = null,
+    val visionModelId: String? = null,
     val visionBackend: BackendType? = null,
+    val connectorModelId: String? = null,
+    val connectorBackend: BackendType? = null,
     val cacheDir: String? = null,
     val maxNumTokens: Int? = null,
     val nativeLibDir: String? = null,
