@@ -1217,6 +1217,11 @@ class MainActivity : AppCompatActivity() {
             onOpenAIMessagesRunBlockingClicked()
         }.apply { isEnabled = !streaming && parseErr == null }
         actions.addView(blockingBtn)
+        spacerH(actions, 8)
+        val toolBtn = tonalButton(t, "Tool API") {
+            onToolSmokeClicked()
+        }.apply { isEnabled = !streaming }
+        actions.addView(toolBtn)
         card.addView(actions)
         return card
     }
@@ -2640,6 +2645,76 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun onToolSmokeClicked() {
+        outputText = ""
+        outputView.text = ""
+        streaming = true
+        setStatus("Running XGrammar Tool API...")
+        mainHandler.post { rebuildUi() }
+
+        val req = buildLoadRequest()
+        engineExecutor.execute {
+            val e = loadModelInternal(req)
+            if (e == null) {
+                streaming = false
+                setStatus("Model load failed.")
+                mainHandler.post { rebuildUi() }
+                return@execute
+            }
+            if (e.chatSessionId != null) {
+                when (val closeResult = e.closeChatSession()) {
+                    is BackendResult.Ok -> clearChatSessionState()
+                    is BackendResult.Err -> {
+                        streaming = false
+                        setStatus("Failed to close chat session: ${closeResult.message ?: closeResult.error.name}")
+                        mainHandler.post { rebuildUi() }
+                        return@execute
+                    }
+                }
+            } else if (sessionIdText != null) {
+                clearChatSessionState()
+            }
+
+            val schema = """
+{
+  "type": "object",
+  "properties": {
+    "query": {"type": "string"},
+    "count": {"type": "integer"}
+  },
+  "required": ["query"]
+}
+""".trimIndent()
+
+            try {
+                when (val r = e.runModelHandleWithTool(
+                    prompt = "Return a compact web search request for Android AAR testing.",
+                    toolName = "android_tool_api_smoke",
+                    toolSchema = schema
+                )) {
+                    is BackendResult.Ok -> {
+                        outputText = r.value
+                        streaming = false
+                        setStatus("Tool API done.")
+                        mainHandler.post {
+                            outputView.text = r.value
+                            rebuildUi()
+                        }
+                    }
+                    is BackendResult.Err -> {
+                        streaming = false
+                        setStatus("Tool API failed: [${r.error.name}] ${r.message ?: ""}")
+                        mainHandler.post { rebuildUi() }
+                    }
+                }
+            } catch (t: Throwable) {
+                streaming = false
+                setStatus("Tool API threw: ${t.message}")
+                mainHandler.post { rebuildUi() }
+            }
+        }
+    }
+
     private fun onOpenAIMessagesRunBlockingClicked() {
         val jsonText = openAIMessagesField.text.toString().trim()
         if (jsonText.isBlank()) { setStatus("Messages JSON is empty."); return }
@@ -2739,6 +2814,30 @@ class MainActivity : AppCompatActivity() {
         text.replace("<|image_strart|>", "<|image_start|>")
 
     private val exampleByModelId: Map<String, String> = mapOf(
+        ModelIds.QWEN3_0_6B to """{
+  "messages": [
+    {"role": "system", "content": "Return only JSON that matches the requested schema."},
+    {"role": "user", "content": "Create a compact Android API wrapper test checklist with three items."}
+  ],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "test_checklist",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string"},
+          "items": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "required": ["title", "items"]
+      }
+    }
+  }
+}""",
         ModelIds.GEMMA4 to """[
   {"role": "system", "content": "You are a concise vision assistant."},
   {"role": "user", "content": [{"type": "text", "text": "Describe this image."}, {"type": "image_url", "image_url": {"url": "sampletestapp://selected-image"}}]}

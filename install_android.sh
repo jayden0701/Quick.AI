@@ -64,6 +64,19 @@ fi
 [ -f "$BUILD_DIR/qnn/libqnn_context.so" ] && \
     adb push "$BUILD_DIR/qnn/libqnn_context.so" $INSTALL_DIR/ && cp "$BUILD_DIR/qnn/libqnn_context.so" "$INSTALL_LIBS_DIR/"
 
+# QNN-enabled Android builds register the QNN context during nntrainer engine
+# initialization, even when a later CLI run loads a CPU model. Keep the QNN SDK
+# runtime libraries beside libqnn_context.so so the context initialization does
+# not fail before CPU-only tests start.
+QNN_PREBUILT_DIR="$SCRIPT_DIR/Android/QuickDotAI/prebuilt_libs"
+if compgen -G "$QNN_PREBUILT_DIR/libQnn*.so" > /dev/null; then
+    echo "Pushing QNN runtime libraries..."
+    for f in "$QNN_PREBUILT_DIR"/libQnn*.so; do
+        adb push "$f" $INSTALL_DIR/ >/dev/null
+        cp "$f" "$INSTALL_LIBS_DIR/"
+    done
+fi
+
 # ── Push libc++_shared.so from NDK ──────────────────────────────────────
 if [ -n "$ANDROID_NDK" ]; then
     LIBCXX=$(find "$ANDROID_NDK" -name "libc++_shared.so" -path "*/aarch64*" 2>/dev/null | head -1)

@@ -87,6 +87,148 @@ static void print_error(const std::string &msg) {
             << clr::reset << "\n";
 }
 
+static ModelQuantizationType parse_quant(const std::string &quant_str) {
+  if (quant_str == "W16A16")
+    return CAUSAL_LM_QUANTIZATION_W16A16;
+  if (quant_str == "W8A16")
+    return CAUSAL_LM_QUANTIZATION_W8A16;
+  if (quant_str == "W32A32")
+    return CAUSAL_LM_QUANTIZATION_W32A32;
+  if (quant_str == "UNKNOWN")
+    return CAUSAL_LM_QUANTIZATION_UNKNOWN;
+  return CAUSAL_LM_QUANTIZATION_W4A32;
+}
+
+static int run_tool_smoke(int argc, char *argv[]) {
+  if (argc < 4) {
+    print_error("Usage: quick_dot_ai_test --tool-smoke <model_id> "
+                "<model_base_path> [prompt] [tool_name] [schema] [quant]");
+    return 2;
+  }
+
+  const char *model_id = argv[2];
+  const char *model_base_path = argv[3];
+  const char *prompt =
+    argc >= 5 ? argv[4] : "Return a web search query for Android testing.";
+  const char *tool_name = argc >= 6 ? argv[5] : "web_search";
+  const char *schema =
+    argc >= 7
+      ? argv[6]
+      : "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},"
+        "\"count\":{\"type\":\"integer\"}},\"required\":[\"query\"]}";
+  const std::string quant_str = argc >= 8 ? argv[7] : "W4A32";
+
+  Config config{};
+  config.use_chat_template = false;
+  config.debug_mode = false;
+  config.verbose = false;
+  config.chat_template_name = nullptr;
+  ErrorCode err = setOptions(config);
+  if (err != CAUSAL_LM_ERROR_NONE) {
+    print_error("setOptions failed (code " + std::to_string(err) + ")");
+    return 1;
+  }
+
+  CausalLmHandle handle = nullptr;
+  err = loadModelHandleByName(CAUSAL_LM_BACKEND_CPU, model_id,
+                              parse_quant(quant_str), nullptr,
+                              model_base_path, &handle);
+  if (err != CAUSAL_LM_ERROR_NONE) {
+    print_error("loadModelHandleByName failed (code " +
+                std::to_string(err) + ")");
+    return 1;
+  }
+
+  const char *output = nullptr;
+  err = runModelHandleWithTool(handle, prompt, &output, tool_name, schema);
+  if (err != CAUSAL_LM_ERROR_NONE) {
+    print_error("runModelHandleWithTool failed (code " +
+                std::to_string(err) + ")");
+    destroyModelHandle(handle);
+    return 1;
+  }
+
+  std::cout << (output != nullptr ? output : "") << "\n";
+  destroyModelHandle(handle);
+  return 0;
+}
+
+static int print_stream_delta(const char *delta, void *) {
+  if (delta != nullptr)
+    std::cout << delta << std::flush;
+  return 0;
+}
+
+static int run_json_smoke(int argc, char *argv[]) {
+  if (argc < 4) {
+    print_error("Usage: quick_dot_ai_test --json-smoke <model_id> "
+                "<model_base_path> [json_request] [quant]");
+    return 2;
+  }
+
+  const char *model_id = argv[2];
+  const char *model_base_path = argv[3];
+  const char *json_request =
+    argc >= 5
+      ? argv[4]
+      : R"({
+  "messages": [
+    {"role": "system", "content": "Return only JSON."},
+    {"role": "user", "content": "Return one compact Android test result."}
+  ],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "android_test_result",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "status": {"type": "string"},
+          "detail": {"type": "string"}
+        },
+        "required": ["status", "detail"]
+      }
+    }
+  }
+})";
+  const std::string quant_str = argc >= 6 ? argv[5] : "W4A32";
+
+  Config config{};
+  config.use_chat_template = true;
+  config.debug_mode = false;
+  config.verbose = false;
+  config.chat_template_name = nullptr;
+  ErrorCode err = setOptions(config);
+  if (err != CAUSAL_LM_ERROR_NONE) {
+    print_error("setOptions failed (code " + std::to_string(err) + ")");
+    return 1;
+  }
+
+  CausalLmHandle handle = nullptr;
+  err = loadModelHandleByName(CAUSAL_LM_BACKEND_CPU, model_id,
+                              parse_quant(quant_str), nullptr,
+                              model_base_path, &handle);
+  if (err != CAUSAL_LM_ERROR_NONE) {
+    print_error("loadModelHandleByName failed (code " +
+                std::to_string(err) + ")");
+    return 1;
+  }
+
+  err = runModelHandleWithJsonStreaming(handle, json_request,
+                                        print_stream_delta, nullptr);
+  std::cout << "\n";
+  if (err != CAUSAL_LM_ERROR_NONE) {
+    print_error("runModelHandleWithJsonStreaming failed (code " +
+                std::to_string(err) + ")");
+    destroyModelHandle(handle);
+    return 1;
+  }
+
+  destroyModelHandle(handle);
+  return 0;
+}
+
 // ── Usage ────────────────────────────────────────────────────────────────────
 static void print_usage(const char *prog) {
   print_banner();
@@ -114,6 +256,11 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  if (std::strcmp(argv[1], "--tool-smoke") == 0)
+    return run_tool_smoke(argc, argv);
+  if (std::strcmp(argv[1], "--json-smoke") == 0)
+    return run_json_smoke(argc, argv);
+
   // ── Parse arguments ──────────────────────────────────────────────────────
   const char *model_name = argv[1];
   const char *prompt = (argc >= 3) ? argv[2] : "Hello, how are you?";
@@ -125,20 +272,11 @@ int main(int argc, char *argv[]) {
     use_chat_template = (arg == "true" || arg == "1");
   }
 
-  ModelQuantizationType quant_type = CAUSAL_LM_QUANTIZATION_W4A32;
   std::string quant_str = "W4A32";
   if (argc >= 5) {
     quant_str = std::string(argv[4]);
-    if (quant_str == "W4A32") {
-      quant_type = CAUSAL_LM_QUANTIZATION_W4A32;
-    } else if (quant_str == "W16A16") {
-      quant_type = CAUSAL_LM_QUANTIZATION_W16A16;
-    } else if (quant_str == "W8A16") {
-      quant_type = CAUSAL_LM_QUANTIZATION_W8A16;
-    } else if (quant_str == "W32A32") {
-      quant_type = CAUSAL_LM_QUANTIZATION_W32A32;
-    }
   }
+  ModelQuantizationType quant_type = parse_quant(quant_str);
 
   bool verbose = true;
   if (argc >= 6) {
@@ -302,15 +440,14 @@ int main(int argc, char *argv[]) {
   // msg.content = prompt;
   // err = runModelHandleWithMessages(handle, &msg, 1, true, &outputText);
 
-  // XGrammar Test
-  auto tool_name = "web_search";
-  auto schema =
-    "{\"type\": \"object\",\"properties\": {\"query\": {\"type\": \"string\", "
-    "\"description\": \"Search query in the most effective language for "
-    "results (use Korean for Korean local info, English for global "
-    "topics)\"},\"count\": {\"type\": \"integer\", \"description\": \"Number "
-    "of results to return (default 5, max 10)\"}},\"required\": [\"query\"]}";
-  err = runModelHandleWithTool(handle, prompt, &outputText, tool_name, schema);
+  err = runModelHandleStreaming(
+    handle, prompt,
+    [](const char *delta, void *) {
+      if (delta != nullptr)
+        std::cout << delta << std::flush;
+      return 0;
+    },
+    nullptr);
 
   if (err != CAUSAL_LM_ERROR_NONE) {
     print_error("Inference failed (code " + std::to_string(err) + ")");
