@@ -11,7 +11,7 @@ end-to-end usage examples here.
 | Chat tab style conversation | `openChatSession()` → `runChatModelHandleStreaming()` → `closeChatSession()` | session is Android-facing | Keeps backend-managed conversation state. |
 | OpenAI-style messages | `runModelHandleWithMessagesStreaming()` | `runModelHandleWithMessagesStreaming()` | Best for models that need message-template formatting but not full JSON fields. |
 | Full OpenAI JSON request | `runModelHandleWithJsonStreaming()` | `runModelHandleWithJsonStreaming()` | Preserves `messages`, `tools`, legacy `functions`, and template kwargs understood by the chat template. |
-| Hard schema-constrained output | not exposed by the AAR today | `runModelHandleWithTool()` | Uses XGrammar token masking. This is different from OpenAI JSON `tools`. |
+| Hard schema-constrained output | `runModelHandleWithTool()` or JSON streaming `response_format` | `runModelHandleWithTool()` or JSON streaming `response_format` | Uses XGrammar token masking. This is different from OpenAI JSON `tools`. |
 
 `tools` in an OpenAI JSON request are passed into the model's chat template.
 They help the model see tool metadata and produce a tool-call shaped answer.
@@ -196,6 +196,44 @@ val jsonRequest = """
 engine.runModelHandleWithJsonStreaming(jsonRequest, sink)
 ```
 
+Use `response_format` when the OpenAI-compatible request should force the
+generated text to match a JSON shape:
+
+```kotlin
+val structuredJsonRequest = """
+{
+  "messages": [
+    {"role": "system", "content": "Return only JSON."},
+    {"role": "user", "content": "Create a compact Android API wrapper test checklist with three items."}
+  ],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "test_checklist",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string"},
+          "items": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "required": ["title", "items"]
+      }
+    }
+  }
+}
+""".trimIndent()
+
+engine.runModelHandleWithJsonStreaming(structuredJsonRequest, sink)
+```
+
+Supported `response_format.type` values are `text`, `json_object`, and
+`json_schema`. `json_schema` uses `response_format.json_schema.schema` as the
+XGrammar JSON Schema.
+
 Legacy OpenAI `functions` are accepted by the chat-template renderer as raw
 function schemas:
 
@@ -299,6 +337,24 @@ ErrorCode err = runModelHandleWithTool(
 
 For an ad-hoc schema, pass the schema on first use:
 
+```kotlin
+val schema = """
+{
+  "type": "object",
+  "properties": {"answer": {"type": "string"}},
+  "required": ["answer"]
+}
+""".trimIndent()
+
+engine.runModelHandleWithTool(
+    prompt = "Return the answer as JSON.",
+    toolName = "answer_schema",
+    toolSchema = schema
+)
+```
+
+The equivalent native C call is:
+
 ```c
 const char *schema =
     "{"
@@ -326,6 +382,7 @@ details.
 |---|---|---|
 | `runModelHandleWithJsonStreaming()` returns `CAUSAL_LM_ERROR_UNSUPPORTED` | The loaded model has no chat template cached. | Add `chat_template.jinja` or `tokenizer_config.json.chat_template` next to the model config. |
 | JSON streaming returns `CAUSAL_LM_ERROR_INVALID_PARAMETER` | The request is not valid JSON or a required pointer is null. | Validate the JSON and ensure `messages` is non-empty for normal chat use. |
+| JSON streaming with `response_format` returns `CAUSAL_LM_ERROR_INVALID_PARAMETER` | `response_format.type` is unsupported or `json_schema.schema` is missing/not an object. | Use `text`, `json_object`, or `json_schema` with a JSON Schema object. |
 | OpenAI tab loses `tools` on `MESSAGES_API` models (e.g. `gemma4-e2b-qnn`, `gemma4`) | The sample routes models with the `MESSAGES_API` capability through messages streaming. | Use a model that supports full JSON streaming, or add a dedicated model-specific full JSON path. |
 | `tools` are visible to the model but output is not schema-valid | OpenAI JSON `tools` only guide the chat template. | Use `runModelHandleWithTool()` and XGrammar for hard constraints. |
 | Chat tab says no active session | `openChatSession()` has not succeeded or the session was closed. | Open a session first, then call `runChatModelHandleStreaming()`. |

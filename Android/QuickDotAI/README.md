@@ -50,6 +50,12 @@ interface QuickDotAI {
         sink: StreamSink
     ): BackendResult<Unit>
 
+    fun runModelHandleWithTool(
+        prompt: String,
+        toolName: String,
+        toolSchema: String? = null
+    ): BackendResult<String>
+
     fun runMultimodalHandle(parts: List<PromptPart>): BackendResult<String>
 
     fun runMultimodalHandleStreaming(
@@ -99,7 +105,25 @@ model ids are loaded through `loadModelHandleByName()` in `quick_dot_ai_api.h`.
 
 Use `runModelHandleWithMessagesStreaming()` for OpenAI-style message lists and
 `runModelHandleWithJsonStreaming()` for full OpenAI JSON requests containing
-`tools` or legacy `functions`.
+`tools`, legacy `functions`, or `response_format`.
+
+OpenAI `tools` / `functions` are rendered into the model prompt by the chat
+template. They do not execute tools or guarantee schema-valid output by
+themselves. For hard-constrained structured output, use either
+`runModelHandleWithTool()` with a JSON Schema string or
+`runModelHandleWithJsonStreaming()` with `response_format`.
+
+```kotlin
+val result = engine.runModelHandleWithTool(
+    prompt = "Return the answer as JSON.",
+    toolName = "answer_schema",
+    toolSchema = """{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"""
+)
+```
+
+`response_format.type` supports `text`, `json_object`, and `json_schema`. The
+`json_schema` form uses `response_format.json_schema.schema` as the XGrammar
+JSON Schema.
 
 End-to-end Chat tab and OpenAI tab examples live in
 [`../../docs/ChatAndOpenAIUsage.md`](../../docs/ChatAndOpenAIUsage.md).
@@ -225,6 +249,8 @@ resolved from the app external files directory, so
 - Call `load()` before any inference call.
 - Drive each `QuickDotAI` instance from one worker thread.
 - Call `close()` when finished; it closes any active chat session.
+- Use `runModelHandleWithTool()` only after loading a native model. LiteRT
+  engines return `UNSUPPORTED` for this API.
 - Pass `nativeLibDir` for native/QNN models when the host app can provide
   `applicationInfo.nativeLibraryDir`.
 - Pass `modelBasePath` for native models when model files live outside the

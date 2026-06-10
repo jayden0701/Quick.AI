@@ -389,8 +389,12 @@ ErrorCode runModelHandleWithJsonStreaming(CausalLmHandle handle,
 ```
 
 `jsonRequest` accepts OpenAI-style request JSON, including `messages`, `tools`,
-and legacy `functions`. A chat template must be available from the loaded model
-directory or the call returns `CAUSAL_LM_ERROR_UNSUPPORTED`.
+legacy `functions`, and `response_format`. `tools` and `functions` are rendered
+into the prompt by the chat template. `response_format` supports `text`,
+`json_object`, and `json_schema`; the JSON-object and JSON-schema forms attach
+an XGrammar schema during streaming generation. A chat template must be
+available from the loaded model directory or the call returns
+`CAUSAL_LM_ERROR_UNSUPPORTED`.
 
 See [`../docs/ChatAndOpenAIUsage.md`](../docs/ChatAndOpenAIUsage.md) for usage
 examples and request routing details.
