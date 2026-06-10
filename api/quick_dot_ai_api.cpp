@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cxxabi.h>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -1689,23 +1690,18 @@ ErrorCode runModelHandleWithMessages(CausalLmHandle handle,
   }
 }
 
-ErrorCode runModelHandleWithTool(CausalLmHandle handle,
-                                 const char *inputTextPrompt,
-                                 const char **outputText, const char *tool_name,
-                                 const char *tool_schema) {
-  if (handle == nullptr) {
+static ErrorCode resolve_xgrammar_tool(const char *tool_name,
+                                       const char *tool_schema,
+                                       causallm::XGrammar **out_grammar) {
+  if (tool_name == nullptr || out_grammar == nullptr)
     return CAUSAL_LM_ERROR_INVALID_PARAMETER;
-  }
 
-  auto &h = *handle;
-
-  causallm::XGrammar *grammar = nullptr;
   // Step 1: Check if tool exists in XGrammarManager
   if (causallm::XGrammarManager::Instance().hasTool(tool_name)) {
     LOGD("[runModelWithToolHandle] Tool '%s' found in XGrammarManager, using "
          "existing grammar",
          tool_name);
-    grammar = causallm::XGrammarManager::Instance().getGrammar(tool_name);
+    *out_grammar = causallm::XGrammarManager::Instance().getGrammar(tool_name);
   } else {
     // Step 2: Tool doesn't exist, create and register it
     if (tool_schema == nullptr) {
@@ -1723,18 +1719,42 @@ ErrorCode runModelHandleWithTool(CausalLmHandle handle,
       return CAUSAL_LM_ERROR_UNKNOWN;
     }
 
-    grammar = causallm::XGrammarManager::Instance().getGrammar(tool_name);
+    *out_grammar = causallm::XGrammarManager::Instance().getGrammar(tool_name);
   }
 
-  if (grammar == nullptr) {
+  if (*out_grammar == nullptr) {
     LOGE("Error: Failed to get grammar for tool '%s'", tool_name);
     return CAUSAL_LM_ERROR_UNKNOWN;
   }
+
+  return CAUSAL_LM_ERROR_NONE;
+}
+
+ErrorCode runModelHandleWithTool(CausalLmHandle handle,
+                                 const char *inputTextPrompt,
+                                 const char **outputText, const char *tool_name,
+                                 const char *tool_schema) {
+  if (handle == nullptr || inputTextPrompt == nullptr ||
+      outputText == nullptr || tool_name == nullptr) {
+    return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+  }
+
+  auto &h = *handle;
+  if (!h.initialized || h.models.empty() || !h.models[0]) {
+    return CAUSAL_LM_ERROR_NOT_INITIALIZED;
+  }
+
+  causallm::XGrammar *grammar = nullptr;
+  ErrorCode grammar_err =
+    resolve_xgrammar_tool(tool_name, tool_schema, &grammar);
+  if (grammar_err != CAUSAL_LM_ERROR_NONE)
+    return grammar_err;
 
   // Run inference using the handle
   h.models[0]->setXGrammar(grammar);
   ErrorCode err = run_on_handle(*handle, inputTextPrompt, outputText);
   h.models[0]->resetXGrammar();
+  h.models[0]->setXGrammar(nullptr);
   return err;
 }
 
@@ -2720,13 +2740,72 @@ ErrorCode runModelHandleWithJsonStreaming(CausalLmHandle handle,
     json request = json::parse(jsonRequest);
     LOGD("[DEBUG]   JSON parsed successfully");
 
+    bool use_response_format = false;
+    std::string response_tool_name;
+    std::string response_schema;
+
+    if (request.contains("response_format") &&
+        !request["response_format"].is_null()) {
+      const json &response_format = request["response_format"];
+      if (!response_format.is_object() ||
+          !response_format.contains("type") ||
+          !response_format["type"].is_string()) {
+        LOGE("[DEBUG] runModelHandleWithJsonStreaming: malformed "
+             "response_format");
+        return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+      }
+
+      const std::string response_type =
+        response_format["type"].get<std::string>();
+      if (response_type == "text") {
+        use_response_format = false;
+      } else if (response_type == "json_object") {
+        use_response_format = true;
+        response_schema = "{\"type\":\"object\"}";
+        response_tool_name = "response_format_json_object_" +
+                             std::to_string(
+                               std::hash<std::string>{}(response_schema));
+      } else if (response_type == "json_schema") {
+        if (!response_format.contains("json_schema") ||
+            !response_format["json_schema"].is_object()) {
+          LOGE("[DEBUG] runModelHandleWithJsonStreaming: missing "
+               "response_format.json_schema object");
+          return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+        }
+        const json &json_schema = response_format["json_schema"];
+        if (!json_schema.contains("schema") ||
+            !json_schema["schema"].is_object()) {
+          LOGE("[DEBUG] runModelHandleWithJsonStreaming: missing "
+               "response_format.json_schema.schema object");
+          return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+        }
+        std::string schema_name = "response_format_json_schema";
+        if (json_schema.contains("name") && json_schema["name"].is_string() &&
+            !json_schema["name"].get<std::string>().empty()) {
+          schema_name = json_schema["name"].get<std::string>();
+        }
+        response_schema = json_schema["schema"].dump();
+        response_tool_name =
+          schema_name + "_" +
+          std::to_string(std::hash<std::string>{}(response_schema));
+        use_response_format = true;
+      } else {
+        LOGE("[DEBUG] runModelHandleWithJsonStreaming: unsupported "
+             "response_format.type='%s'",
+             response_type.c_str());
+        return CAUSAL_LM_ERROR_INVALID_PARAMETER;
+      }
+    }
+
     // Apply chat template using the existing g_chat_template
     // The chat_template.apply() method handles messages, tools, functions, etc.
     std::string formattedInput;
     if (g_chat_template.has_value()) {
       LOGD(
         "[DEBUG] runModelHandleWithJsonStreaming: Applying chat template...");
-      formattedInput = g_chat_template->apply(request);
+      json template_request = request;
+      template_request.erase("response_format");
+      formattedInput = g_chat_template->apply(template_request);
       LOGD("[DEBUG]   Formatted input length: %zu", formattedInput.length());
       LOGD("[DEBUG]   Formatted input preview: %.100s%s",
            formattedInput.c_str(), formattedInput.length() > 100 ? "..." : "");
@@ -2737,6 +2816,23 @@ ErrorCode runModelHandleWithJsonStreaming(CausalLmHandle handle,
     }
 
     LOGD("[DEBUG] runModelHandleWithJsonStreaming: Running inference...");
+    if (use_response_format) {
+      causallm::XGrammar *grammar = nullptr;
+      ErrorCode grammar_err = resolve_xgrammar_tool(
+        response_tool_name.c_str(), response_schema.c_str(), &grammar);
+      if (grammar_err != CAUSAL_LM_ERROR_NONE)
+        return grammar_err;
+
+      auto *model = h.models[model_index].get();
+      model->setXGrammar(grammar);
+      ErrorCode ec = run_model_streaming_on_handle(
+        h, formattedInput, callback, user_data,
+        /*input_already_formatted=*/true, model_index);
+      model->resetXGrammar();
+      model->setXGrammar(nullptr);
+      return ec;
+    }
+
     return run_model_streaming_on_handle(h, formattedInput, callback, user_data,
                                          /*input_already_formatted=*/true,
                                          model_index);

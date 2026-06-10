@@ -24,31 +24,6 @@ streamer_src = [
   meson.project_source_root() / 'api' / 'streamer.cpp',
 ]
 
-# ── Android system libraries ────────────────────────────────────────────
-if is_android
-  log_dep = cxx.find_library('log')
-else
-  log_dep = dependency('', required: false)
-endif
-
-# ── Build CausalLM as shared library ───────────────────────────────────
-streamer_inc = include_directories('../api')
-
-causallm_lib = shared_library('causallm',
-    causallm_auto_src,
-    streamer_src,
-    include_directories: [streamer_inc],
-    dependencies: [nntrainer_dep, openmp_dep, log_dep],
-    cpp_args: causallm_inc_args,
-    link_args: [tokenizer_path],
-    install: true,
-)
-
-causallm_dep = declare_dependency(
-    link_with: causallm_lib,
-    compile_args: causallm_inc_args,
-)
-
 # ── XGrammar wrapper sources ────────────────────────────────────────────
 xgrammar_wrapper_src = [
   meson.current_source_dir() / 'xgrammar' / 'xgrammar_wrapper.cpp',
@@ -82,17 +57,44 @@ xgrammar_lib_src = [
   meson.project_source_root() / 'xgrammar' / 'cpp' / 'support' / 'recursion_guard.cc',
 ]
 
+# ── Android system libraries ────────────────────────────────────────────
+if is_android
+  log_dep = cxx.find_library('log')
+else
+  log_dep = dependency('', required: false)
+endif
+
+# ── Build CausalLM as shared library ───────────────────────────────────
+streamer_inc = include_directories('../api')
+
+causallm_lib = shared_library('causallm',
+    causallm_auto_src,
+    streamer_src,
+    xgrammar_wrapper_src,
+    xgrammar_lib_src,
+    include_directories: [streamer_inc, xgrammar_wrapper_inc],
+    dependencies: [nntrainer_dep, openmp_dep, log_dep],
+    cpp_args: causallm_inc_args,
+    link_args: [tokenizer_path],
+    install: true,
+)
+
+causallm_dep = declare_dependency(
+    link_with: causallm_lib,
+    compile_args: causallm_inc_args,
+)
+
 # ── Extension model sources ────────────────────────────────────────────
 quick_dot_ai_src = []
 quick_dot_ai_inc = []
 
-# Add XGrammar wrapper and library sources
-# Note: xgrammar include paths are already in causallm_inc_args (root meson.build)
-quick_dot_ai_src += xgrammar_wrapper_src
-quick_dot_ai_src += xgrammar_lib_src
 quick_dot_ai_inc += xgrammar_wrapper_inc
 
 subdir('models')
+
+if quick_dot_ai_src.length() == 0
+  quick_dot_ai_src += meson.current_source_dir() / 'quick_dot_ai_empty.cpp'
+endif
 
 # Add an include directory for every CPU model subdirectory present so that
 # proprietary model TUs can resolve their own headers. Discovered generically:
