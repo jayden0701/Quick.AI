@@ -169,6 +169,46 @@ class NativeQuickDotAI(
         }
     }
 
+    override fun runModelHandleWithTool(
+        prompt: String,
+        toolName: String,
+        toolSchema: String?
+    ): BackendResult<String> {
+        if (!loaded || handle == 0L) {
+            return BackendResult.Err(
+                QuickAiError.NOT_INITIALIZED,
+                "NativeQuickDotAI has not been loaded yet"
+            )
+        }
+        if (prompt.isBlank() || toolName.isBlank()) {
+            return BackendResult.Err(
+                QuickAiError.INVALID_PARAMETER,
+                "prompt and toolName must be non-empty"
+            )
+        }
+
+        return try {
+            val result = NativeCausalLm.runModelHandleWithToolNative(
+                handle = handle,
+                prompt = prompt,
+                toolName = toolName,
+                toolSchema = toolSchema
+            )
+            if (result.errorCode != 0) {
+                val err = QuickAiError.fromNativeCode(result.errorCode)
+                BackendResult.Err(
+                    err,
+                    "runModelHandleWithTool failed (errorCode=${result.errorCode})"
+                )
+            } else {
+                BackendResult.Ok(result.output.orEmpty())
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "runModelHandleWithTool() threw", t)
+            BackendResult.Err(QuickAiError.INFERENCE_FAILED, t.message)
+        }
+    }
+
     override fun unload(): BackendResult<Unit> {
         // Cancel any in-flight inference before unloading
         cancel()

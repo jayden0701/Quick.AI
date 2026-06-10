@@ -420,7 +420,83 @@ int stream_trampoline(const char *delta, void *user_data) {
   }
   return 0;
 }
+
+jobject make_run_result(JNIEnv *env, ErrorCode ec, const char *output) {
+  if (g_cache.runResultCls == nullptr || g_cache.runResultCtor == nullptr) {
+    return nullptr;
+  }
+
+  jstring outputJ = nullptr;
+  if (output != nullptr) {
+    if (!is_valid_utf8(output)) {
+      ec = CAUSAL_LM_ERROR_INFERENCE_FAILED;
+    } else {
+      outputJ = env->NewStringUTF(output);
+      if (outputJ == nullptr && env->ExceptionCheck()) {
+        env->ExceptionClear();
+        ec = CAUSAL_LM_ERROR_UNKNOWN;
+      }
+    }
+  }
+
+  jobject result = env->NewObject(g_cache.runResultCls, g_cache.runResultCtor,
+                                  static_cast<jint>(ec), outputJ);
+  if (outputJ != nullptr) {
+    env->DeleteLocalRef(outputJ);
+  }
+  return result;
+}
 } // namespace
+
+// ---------------------------------------------------------------------------
+// runModelHandleWithTool
+//
+// Non-streaming XGrammar-constrained generation. Returns a Kotlin RunResult
+// containing the native error code and complete generated output string.
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_example_quickdotai_NativeCausalLm_runModelHandleWithToolNative(
+  JNIEnv *env, jobject /*thiz*/, jlong handleJlong, jstring promptJ,
+  jstring toolNameJ, jstring toolSchemaJ) {
+  if (promptJ == nullptr || toolNameJ == nullptr) {
+    return make_run_result(env, CAUSAL_LM_ERROR_INVALID_PARAMETER, nullptr);
+  }
+
+  const char *prompt = env->GetStringUTFChars(promptJ, nullptr);
+  const char *tool_name = env->GetStringUTFChars(toolNameJ, nullptr);
+  const char *tool_schema =
+    toolSchemaJ != nullptr ? env->GetStringUTFChars(toolSchemaJ, nullptr)
+                           : nullptr;
+
+  if (prompt == nullptr || tool_name == nullptr ||
+      (toolSchemaJ != nullptr && tool_schema == nullptr)) {
+    ErrorCode ec = env->ExceptionCheck() ? CAUSAL_LM_ERROR_UNKNOWN
+                                         : CAUSAL_LM_ERROR_INVALID_PARAMETER;
+    if (env->ExceptionCheck())
+      env->ExceptionClear();
+    if (prompt != nullptr)
+      env->ReleaseStringUTFChars(promptJ, prompt);
+    if (tool_name != nullptr)
+      env->ReleaseStringUTFChars(toolNameJ, tool_name);
+    if (tool_schema != nullptr)
+      env->ReleaseStringUTFChars(toolSchemaJ, tool_schema);
+    return make_run_result(env, ec, nullptr);
+  }
+
+  const char *output = nullptr;
+  auto handle = reinterpret_cast<CausalLmHandle>(handleJlong);
+  ErrorCode ec =
+    runModelHandleWithTool(handle, prompt, &output, tool_name, tool_schema);
+
+  jobject result = make_run_result(env, ec, output);
+
+  env->ReleaseStringUTFChars(promptJ, prompt);
+  env->ReleaseStringUTFChars(toolNameJ, tool_name);
+  if (tool_schema != nullptr)
+    env->ReleaseStringUTFChars(toolSchemaJ, tool_schema);
+
+  return result;
+}
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_example_quickdotai_NativeCausalLm_runModelHandleStreamingNative(

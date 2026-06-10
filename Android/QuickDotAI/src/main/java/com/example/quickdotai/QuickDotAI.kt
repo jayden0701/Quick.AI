@@ -192,6 +192,24 @@ interface QuickDotAI {
             "encode() is not supported by this engine"
         )
 
+    /**
+     * @brief Run hard-constrained generation with an XGrammar tool schema.
+     *
+     * [toolSchema] is a JSON Schema object string. When null, the native
+     * engine looks for a preloaded schema named [toolName] from the model's
+     * `Toolset.json`. The output is returned as one complete string because
+     * the underlying C API is non-streaming.
+     */
+    fun runModelHandleWithTool(
+        prompt: String,
+        toolName: String,
+        toolSchema: String? = null
+    ): BackendResult<String> =
+        BackendResult.Err(
+            QuickAiError.UNSUPPORTED,
+            "runModelHandleWithTool is not supported by engine '$kind'."
+        )
+
     // ----- Chat session API ------------------------------------------------
     // All chat operations go through this interface so the app never needs
     // to interact with chat session classes directly.

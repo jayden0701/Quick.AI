@@ -345,6 +345,20 @@ object NativeCausalLm {
     ): Int
 
     /**
+     * @brief Forwards to `runModelHandleWithTool` in quick_dot_ai_api.h.
+     *
+     * Runs non-streaming XGrammar-constrained generation. [toolSchema] is a
+     * JSON Schema object string, or null when [toolName] refers to a schema
+     * preloaded from Toolset.json.
+     */
+    external fun runModelHandleWithToolNative(
+        handle: Long,
+        prompt: String,
+        toolName: String,
+        toolSchema: String?
+    ): RunResult
+
+    /**
      * @brief Multimodal streaming inference with multi-image support (V-JEPA).
      *
      * @param handle              Handle returned by loadModelHandleNative
