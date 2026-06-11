@@ -308,8 +308,9 @@ int main(int argc, char *argv[]) {
     "{\"type\": \"object\",\"properties\": {\"query\": {\"type\": \"string\", "
     "\"description\": \"Search query in the most effective language for "
     "results (use Korean for Korean local info, English for global "
-    "topics)\"},\"count\": {\"type\": \"integer\", \"description\": \"Number "
-    "of results to return (default 5, max 10)\"}},\"required\": [\"query\"]}";
+    "topics)\"},\"count\": {\"type\": \"integer\", \"minimum\": 1, "
+    "\"maximum\": 10, \"description\": \"Number of results to return "
+    "(default 5, max 10)\"}},\"required\": [\"query\"]}";
   err = runModelHandleWithTool(handle, prompt, &outputText, tool_name, schema);
 
   if (err != CAUSAL_LM_ERROR_NONE) {

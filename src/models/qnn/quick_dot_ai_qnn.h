@@ -24,6 +24,7 @@
 #include <atomic>
 #include <iostream>
 #include <set>
+#include <string>
 #include <transformer.h>
 
 // Forward declaration for XGrammar
@@ -58,7 +59,7 @@ public:
   ~Quick_Dot_AI_QNN() override;
 
   void initialize() override;
-  void initialize(const std::string &native_lib_dir) override;
+  void initialize(const std::string &native_lib_dir);
 
   void load_weight(const std::string &weight_path) override;
 
@@ -66,6 +67,10 @@ public:
 
   virtual bool supportsKvCachePersistence() const { return false; }
   virtual int getKvLen() const { return 0; }
+  std::string getOutput(int batch_idx = 0) const {
+    (void)batch_idx;
+    return last_output_;
+  }
   virtual void resetKvCache() {
     throw std::runtime_error("QNN KV cache is not supported by this model");
   }
@@ -94,17 +99,17 @@ public:
    * @brief Attach (or detach) a BaseStreamer to intercept per-token output.
    *        Passing nullptr detaches any currently-attached streamer.
    */
-  void setStreamer(::BaseStreamer *streamer) override { streamer_ = streamer; }
+  void setStreamer(::BaseStreamer *streamer) { streamer_ = streamer; }
 
   /**
    * @brief Attach an XGrammar instance for grammar-constrained generation.
    */
-  void setXGrammar(XGrammar *grammar) override { xgrammar_ = grammar; }
+  void setXGrammar(XGrammar *grammar) { xgrammar_ = grammar; }
 
   /**
    * @brief Reset the XGrammar matcher state after generation.
    */
-  void resetXGrammar() override;
+  void resetXGrammar();
 
   /**
    * @brief Request cancellation of the current run().
@@ -113,7 +118,7 @@ public:
    * generation loop to exit at the next token boundary. Safe to call
    * from any thread (e.g., from a UI cancel button handler).
    */
-  void requestStop() override {
+  void requestStop() {
 #ifdef __ANDROID__
     __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
                         "requestStop: setting stop_requested_ to true");
@@ -160,6 +165,7 @@ protected:
   std::string model_file_name;
   std::string embedding_path;
   std::string binary_config_path;
+  std::string native_lib_dir_;
   std::vector<std::string> graphs_to_use;
   std::string last_output_;
 

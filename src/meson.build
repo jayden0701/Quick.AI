@@ -5,20 +5,40 @@
 # ── CausalLM sources ───────────────────────────────────────────────────
 # NOTE: Do NOT include causallm_root / 'api' — the API layer is provided
 # by quick-dot-ai-api. Including it would shadow symbols via interposition.
-causallm_auto_src = run_command('find',
+fs = import('fs')
+causallm_src_roots = [
   causallm_root / 'layers',
   causallm_root / 'models',
-  causallm_root / 'tokenizers',
   causallm_root / 'llm_util.cpp',
+  causallm_root / 'huggingface_tokenizer.cpp',
   causallm_root / 'chat_template.cpp',
   # kv_cache_manager.cpp: new top-level TU from the upstream merge; defines
   # causallm::KVCacheManager used by the CausalLM models. Must be compiled into
   # libcausallm.so or its symbols are undefined at link.
   causallm_root / 'kv_cache_manager.cpp',
-  '-name', '*.cpp',
-  '-not', '-name', 'main.cpp',
-  '-not', '-name', 'test_api.cpp',
-  check: true).stdout().strip().split('\n')
+]
+
+if fs.exists(causallm_root / 'tokenizers')
+  causallm_src_roots += causallm_root / 'tokenizers'
+endif
+
+causallm_auto_src = []
+foreach _causallm_src_root : causallm_src_roots
+  if fs.exists(_causallm_src_root)
+    _found_causallm_src = run_command(
+      'find',
+      _causallm_src_root,
+      '-name', '*.cpp',
+      '-not', '-name', 'main.cpp',
+      '-not', '-name', 'test_api.cpp',
+      '-not', '-name', 'unittest_*.cpp',
+      check: true,
+    ).stdout().strip()
+    if _found_causallm_src != ''
+      causallm_auto_src += _found_causallm_src.split('\n')
+    endif
+  endif
+endforeach
 
 streamer_src = [
   meson.project_source_root() / 'api' / 'streamer.cpp',

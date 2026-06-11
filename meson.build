@@ -14,6 +14,7 @@ project('quick-dot-ai', 'c', 'cpp',
 # ── Compiler setup ──────────────────────────────────────────────────────
 cc = meson.get_compiler('c')
 cxx = meson.get_compiler('cpp')
+fs = import('fs')
 
 # ── Platform detection ──────────────────────────────────────────────────
 _platform_opt = get_option('platform')
@@ -100,12 +101,22 @@ else
 endif
 
 # ── CausalLM includes ──────────────────────────────────────────────────
-causallm_auto_inc_dirs = run_command('find',
+causallm_auto_inc_dirs = []
+foreach _causallm_inc_root : [
   causallm_root / 'layers',
   causallm_root / 'models',
   causallm_root / 'res',
-  '-type', 'd',
-  check: true).stdout().strip().split('\n')
+]
+  if fs.exists(_causallm_inc_root)
+    _found_inc_dirs = run_command(
+      'find', _causallm_inc_root, '-type', 'd',
+      check: true,
+    ).stdout().strip()
+    if _found_inc_dirs != ''
+      causallm_auto_inc_dirs += _found_inc_dirs.split('\n')
+    endif
+  endif
+endforeach
 
 causallm_inc_args = ['-I' + causallm_root]
 foreach d : causallm_auto_inc_dirs
@@ -114,6 +125,7 @@ endforeach
 
 # Add minja include path for chat template support
 causallm_inc_args += ['-I' + causallm_root / 'third_party' / 'minja' / 'include']
+causallm_inc_args += ['-I' + causallm_root / 'third_party']
 
 # ── XGrammar ──────────────────────────────────────────────────
 causallm_inc_args += ['-I' + project_root / 'src' / 'xgrammar']

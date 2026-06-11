@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cxxabi.h>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -69,7 +70,6 @@
 #endif
 
 using json = nlohmann::json;
-using causallm::multimodal_pointer;
 
 /**
  * @brief Per-handle state for a loaded CausalLM model instance.
@@ -111,6 +111,116 @@ static std::string g_chat_template_name = "default";
 static CausalLmModel &get_default_handle() {
   static CausalLmModel instance;
   return instance;
+}
+
+class XGrammarLogitsProcessor final : public causallm::LogitsProcessor {
+public:
+  explicit XGrammarLogitsProcessor(causallm::XGrammar *grammar,
+                                   std::function<void()> on_completed = {})
+    : grammar_(grammar), on_completed_(std::move(on_completed)) {}
+
+  void process(float *logits, unsigned int vocab_size,
+               unsigned int batch_index) override {
+    if (batch_index != 0 || grammar_ == nullptr ||
+        !grammar_->isGrammarEnabled()) {
+      return;
+    }
+    grammar_->applyGrammarMask(logits, static_cast<int>(vocab_size));
+  }
+
+  void acceptToken(unsigned int token_id, unsigned int batch_index) override {
+    if (batch_index != 0 || grammar_ == nullptr ||
+        grammar_->getGrammarMatcher() == nullptr) {
+      return;
+    }
+    auto *matcher = grammar_->getGrammarMatcher();
+    if (!matcher->AcceptToken(static_cast<int32_t>(token_id))) {
+      return;
+    }
+    if (matcher->IsCompleted() || matcher->IsTerminated()) {
+      if (on_completed_) {
+        on_completed_();
+      }
+      return;
+    }
+    grammar_->getGrammarMatcher()->FillNextTokenBitmask(
+      &grammar_->getBitmaskTensor());
+  }
+
+  void reset() override {
+    if (grammar_ != nullptr) {
+      grammar_->resetGrammar();
+    }
+  }
+
+private:
+  causallm::XGrammar *grammar_;
+  std::function<void()> on_completed_;
+};
+
+static causallm::CausalLM *as_causal_lm(causallm::Transformer *model) {
+  return dynamic_cast<causallm::CausalLM *>(model);
+}
+
+#ifdef ENABLE_QNN
+static causallm::Quick_Dot_AI_QNN *
+as_qnn_model(causallm::Transformer *model) {
+  return dynamic_cast<causallm::Quick_Dot_AI_QNN *>(model);
+}
+#endif
+
+static bool model_supports_text_output(causallm::Transformer *model) {
+  if (as_causal_lm(model) != nullptr)
+    return true;
+#ifdef ENABLE_QNN
+  if (as_qnn_model(model) != nullptr)
+    return true;
+#endif
+  return false;
+}
+
+static bool get_model_output(causallm::Transformer *model,
+                             std::string &output) {
+  if (auto *causal_model = as_causal_lm(model)) {
+    output = causal_model->getOutput(0);
+    return true;
+  }
+#ifdef ENABLE_QNN
+  if (auto *qnn_model = as_qnn_model(model)) {
+    output = qnn_model->getOutput(0);
+    return true;
+  }
+#endif
+  return false;
+}
+
+static bool set_model_streamer(causallm::Transformer *model,
+                               ::BaseStreamer *streamer) {
+  if (auto *causal_model = as_causal_lm(model)) {
+    causal_model->setStreamer(streamer);
+    return true;
+  }
+#ifdef ENABLE_QNN
+  if (auto *qnn_model = as_qnn_model(model)) {
+    qnn_model->setStreamer(streamer);
+    return true;
+  }
+#endif
+  return false;
+}
+
+static bool request_model_stop(causallm::Transformer *model) {
+  if (auto *causal_model = as_causal_lm(model)) {
+    causal_model->requestStop();
+    return true;
+  }
+#ifdef ENABLE_QNN
+  if (auto *qnn_model = as_qnn_model(model)) {
+    qnn_model->requestStop();
+    return true;
+  }
+#endif
+  return false;
 }
 
 static std::map<std::string, std::string> g_model_path_map = {
@@ -1112,10 +1222,8 @@ static ErrorCode load_into_handle(CausalLmModel &h, BackendType compute,
           auto sub_t0 = std::chrono::high_resolution_clock::now();
           if (native_lib_dir != nullptr && strlen(native_lib_dir) > 0) {
             setenv("ADSP_LIBRARY_PATH", native_lib_dir, 1);
-            m->initialize(std::string(native_lib_dir));
-          } else {
-            m->initialize();
           }
+          m->initialize();
 
           std::string weight_file =
             sub_nntr.contains("model_file_name")
@@ -1282,10 +1390,8 @@ static ErrorCode load_into_handle(CausalLmModel &h, BackendType compute,
     LOGD("[DEBUG] load_into_handle: Calling model->initialize()...");
     if (native_lib_dir != nullptr && strlen(native_lib_dir) > 0) {
       setenv("ADSP_LIBRARY_PATH", native_lib_dir, 1);
-      m->initialize(std::string(native_lib_dir));
-    } else {
-      m->initialize();
     }
+    m->initialize();
     LOGD("[DEBUG] load_into_handle: model->initialize() done");
 
     LOGD("[DEBUG] load_into_handle: Calling model->load_weight()...");
@@ -1387,19 +1493,25 @@ static ErrorCode run_on_handle(CausalLmModel &h, const char *inputTextPrompt,
   }
 
   try {
-    auto &model = *h.models[model_index];
+    auto *model = h.models[model_index].get();
+    if (!model_supports_text_output(model)) {
+      LOGE("run_on_handle: model[%zu] does not expose text output",
+           model_index);
+      return CAUSAL_LM_ERROR_UNSUPPORTED;
+    }
     std::string input = prepare_input_for_model(
       h, model_index, std::string(inputTextPrompt), input_already_formatted);
 
 // We assume single batch request for this API
 #if defined(_WIN32)
-    model.run(std::wstring(input.begin(), input.end()), false, L"", L"",
-              g_verbose);
+    model->run(std::wstring(input.begin(), input.end()), false, L"", L"",
+               g_verbose);
 #else
-    model.run(input, false, "", "", g_verbose);
+    model->run(input, false, "", "", g_verbose);
 #endif
 
-    h.last_output = model.getOutput(0);
+    if (!get_model_output(model, h.last_output))
+      return CAUSAL_LM_ERROR_UNSUPPORTED;
     *outputText = h.last_output.c_str();
     update_handle_session_after_run(h, model_index);
   } catch (const std::exception &e) {
@@ -1731,10 +1843,37 @@ ErrorCode runModelHandleWithTool(CausalLmHandle handle,
     return CAUSAL_LM_ERROR_UNKNOWN;
   }
 
-  // Run inference using the handle
-  h.models[0]->setXGrammar(grammar);
-  ErrorCode err = run_on_handle(*handle, inputTextPrompt, outputText);
-  h.models[0]->resetXGrammar();
+  size_t model_index = text_generation_model_index(h);
+  if (model_index >= h.models.size() || !h.models[model_index]) {
+    return CAUSAL_LM_ERROR_NOT_INITIALIZED;
+  }
+
+  auto *model = h.models[model_index].get();
+  XGrammarLogitsProcessor processor(grammar,
+                                    [model]() { request_model_stop(model); });
+#ifdef ENABLE_QNN
+  if (auto *qnn_model = as_qnn_model(model)) {
+    qnn_model->setXGrammar(grammar);
+    struct QnnGrammarDetach {
+      causallm::Quick_Dot_AI_QNN *model;
+      ~QnnGrammarDetach() { model->resetXGrammar(); }
+    } detach_guard{qnn_model};
+    return run_on_handle(*handle, inputTextPrompt, outputText,
+                         /*input_already_formatted=*/false, model_index);
+  }
+#endif
+  model->setLogitsProcessor(&processor);
+
+  struct LogitsProcessorDetach {
+    causallm::Transformer *model;
+    ~LogitsProcessorDetach() {
+      model->setLogitsProcessor(nullptr);
+    }
+  } detach_guard{model};
+
+  ErrorCode err =
+    run_on_handle(*handle, inputTextPrompt, outputText,
+                  /*input_already_formatted=*/false, model_index);
   return err;
 }
 
@@ -1868,6 +2007,16 @@ ErrorCode loadMultimodalHandleByName(BackendType compute,
       llm_model_id == nullptr)
     return CAUSAL_LM_ERROR_INVALID_PARAMETER;
 
+#ifndef QUICKAI_ENABLE_EXPERIMENTAL_MULTIMODAL_NNTRAINER_API
+  (void)compute;
+  (void)quant_type;
+  (void)native_lib_dir;
+  (void)model_base_path;
+  *out_handle = nullptr;
+  LOGE("loadMultimodalHandleByName: experimental multimodal nntrainer API is "
+       "not enabled");
+  return CAUSAL_LM_ERROR_UNSUPPORTED;
+#else
   register_models();
 
   auto ev = find_descriptor_by_id(embedding_model_id);
@@ -1931,6 +2080,7 @@ ErrorCode loadMultimodalHandleByName(BackendType compute,
 
   *out_handle = h;
   return CAUSAL_LM_ERROR_NONE;
+#endif
 }
 
 ErrorCode saveQnnKvCacheHandle(CausalLmHandle handle, const char *cache_path) {
@@ -1976,14 +2126,21 @@ static ErrorCode run_model_streaming_on_handle(CausalLmModel &h,
     return CAUSAL_LM_ERROR_NOT_INITIALIZED;
   }
   auto *m = h.models[model_index].get();
+  if (!model_supports_text_output(m)) {
+    LOGE("[DEBUG] run_model_streaming_on_handle: model[%zu] does not expose "
+         "text output",
+         model_index);
+    return CAUSAL_LM_ERROR_UNSUPPORTED;
+  }
 
   CallbackStreamer streamer;
   callback_streamer_init(&streamer, callback, user_data);
-  m->setStreamer(&streamer.base);
+  if (!set_model_streamer(m, &streamer.base))
+    return CAUSAL_LM_ERROR_UNSUPPORTED;
 
   struct Detach {
     causallm::Transformer *t;
-    ~Detach() { t->setStreamer(nullptr); }
+    ~Detach() { set_model_streamer(t, nullptr); }
   } detach_guard{m};
 
   try {
@@ -2009,7 +2166,8 @@ static ErrorCode run_model_streaming_on_handle(CausalLmModel &h,
     m->run(input, false, "", "", true);
 #endif
 
-    h.last_output = m->getOutput(0);
+    if (!get_model_output(m, h.last_output))
+      return CAUSAL_LM_ERROR_UNSUPPORTED;
     update_handle_session_after_run(h, model_index);
 
     if (m->hasRun()) {
@@ -2207,8 +2365,11 @@ ErrorCode cancelModelHandle(CausalLmHandle handle) {
   // Set stop flag on all models (primarily affects models[0] for LLM)
   for (size_t i = 0; i < handle->models.size(); ++i) {
     if (handle->models[i]) {
+      if (!request_model_stop(handle->models[i].get())) {
+        LOGD("[DEBUG] cancelModelHandle: model[%zu] is not cancellable", i);
+        continue;
+      }
       LOGD("[DEBUG] cancelModelHandle: calling requestStop() on model[%zu]", i);
-      handle->models[i]->requestStop();
     }
   }
 
@@ -2227,7 +2388,8 @@ ErrorCode cancelModelHandle(CausalLmHandle handle) {
  * CAUSAL_LM_ERROR_UNSUPPORTED.
  *============================================================================*/
 
-#ifdef ENABLE_QNN
+#if defined(ENABLE_QNN) &&                                                \
+  defined(QUICKAI_ENABLE_EXPERIMENTAL_MULTIMODAL_NNTRAINER_API)
 /**
  * Model-agnostic multimodal composer. Works through base Transformer virtuals
  * only (no concrete-model casts), so any [vision producer, LLM consumer] pair
@@ -2350,7 +2512,7 @@ run_vision_encoder(CausalLmModel &h, const char *prompt,
                            originalHeight, originalWidth, /*do_sample=*/false,
                            "", "", g_verbose);
 }
-#endif // ENABLE_QNN
+#endif // ENABLE_QNN && QUICKAI_ENABLE_EXPERIMENTAL_MULTIMODAL_NNTRAINER_API
 
 ErrorCode runMultimodalHandleStreaming(CausalLmHandle handle,
                                        const char *prompt,
@@ -2412,7 +2574,8 @@ ErrorCode runMultimodalHandleStreaming(CausalLmHandle handle,
          (totalValues > 4 ? pixelValues[4] : 0.0f));
   }
 
-#ifdef ENABLE_QNN
+#if defined(ENABLE_QNN) &&                                                \
+  defined(QUICKAI_ENABLE_EXPERIMENTAL_MULTIMODAL_NNTRAINER_API)
   // Generic path: models[0]=vision producer, models[1]=LLM consumer.
   causallm::multimodal_pointer image_embeds{nullptr, 0};
   try {
@@ -2434,7 +2597,8 @@ ErrorCode runMultimodalHandleStreaming(CausalLmHandle handle,
   return execute_multimodal(h, h.models[1].get(), image_embeds, input,
                             callback, user_data);
 #else
-  LOGE("[DEBUG] runMultimodalHandleStreaming: built without ENABLE_QNN");
+  LOGE("[DEBUG] runMultimodalHandleStreaming: experimental multimodal "
+       "nntrainer API is not enabled");
   return CAUSAL_LM_ERROR_UNSUPPORTED;
 #endif
 }
@@ -2512,7 +2676,8 @@ ErrorCode runMultimodalHandleWithMessages(
          (totalValues > 4 ? pixelValues[4] : 0.0f));
   }
 
-#ifdef ENABLE_QNN
+#if defined(ENABLE_QNN) &&                                                \
+  defined(QUICKAI_ENABLE_EXPERIMENTAL_MULTIMODAL_NNTRAINER_API)
   causallm::multimodal_pointer image_embeds{nullptr, 0};
   try {
     image_embeds = run_vision_encoder(h, prompt.c_str(), pixelValues,
@@ -2536,7 +2701,8 @@ ErrorCode runMultimodalHandleWithMessages(
     return ec;
   }
 #else
-  LOGE("[DEBUG] runMultimodalHandleWithMessages: built without ENABLE_QNN");
+  LOGE("[DEBUG] runMultimodalHandleWithMessages: experimental multimodal "
+       "nntrainer API is not enabled");
   *outputText = nullptr;
   return CAUSAL_LM_ERROR_UNSUPPORTED;
 #endif
