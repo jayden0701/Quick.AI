@@ -353,6 +353,25 @@ engine.runModelHandleWithTool(
 )
 ```
 
+In `SampleTestAPP`, the OpenAI tab also has a **Tool API JSON** field. That
+field is intentionally separate from OpenAI `tools`: pressing **Run Tool JSON**
+parses this shape and always calls `runModelHandleWithTool()` directly.
+
+```json
+{
+  "prompt": "Return the exact tool JSON.",
+  "tool_name": "android_tool_api_direct_enum",
+  "tool_schema": {
+    "type": "object",
+    "properties": {
+      "query": {"type": "string", "enum": ["android aar testing"]},
+      "count": {"type": "integer", "enum": [3]}
+    },
+    "required": ["query", "count"]
+  }
+}
+```
+
 The equivalent native C call is:
 
 ```c
@@ -371,6 +390,19 @@ ErrorCode err = runModelHandleWithTool(
     schema);
 ```
 
+The same path can be tested from adb without using the app UI:
+
+```bash
+export ANDROID_SERIAL=R3CW202SCPB
+adb shell 'cd /data/local/tmp/Quick.AI &&
+  export LD_LIBRARY_PATH=/data/local/tmp/Quick.AI:$LD_LIBRARY_PATH &&
+  export NNTR_NUM_THREADS=7 &&
+  ./quick_dot_ai_test --tool-json qwen3-0.6b \
+    /sdcard/Download/aistudio-mobile/models \
+    "{\"prompt\":\"Return the exact tool JSON.\",\"tool_name\":\"android_tool_api_direct_enum\",\"tool_schema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"enum\":[\"android aar testing\"]},\"count\":{\"type\":\"integer\",\"enum\":[3]}},\"required\":[\"query\",\"count\"]}}" \
+    W4A32'
+```
+
 The XGrammar manager compiles schemas once and can load/save
 `Toolset.json.cache` for faster subsequent loads. See
 [XGrammar Reference](XGrammarReference.md) for cache behavior and C++ manager
@@ -383,7 +415,7 @@ details.
 | `runModelHandleWithJsonStreaming()` returns `CAUSAL_LM_ERROR_UNSUPPORTED` | The loaded model has no chat template cached. | Add `chat_template.jinja` or `tokenizer_config.json.chat_template` next to the model config. |
 | JSON streaming returns `CAUSAL_LM_ERROR_INVALID_PARAMETER` | The request is not valid JSON or a required pointer is null. | Validate the JSON and ensure `messages` is non-empty for normal chat use. |
 | JSON streaming with `response_format` returns `CAUSAL_LM_ERROR_INVALID_PARAMETER` | `response_format.type` is unsupported or `json_schema.schema` is missing/not an object. | Use `text`, `json_object`, or `json_schema` with a JSON Schema object. |
-| OpenAI tab loses `tools` on `MESSAGES_API` models (e.g. `gemma4-e2b-qnn`, `gemma4`) | The sample routes models with the `MESSAGES_API` capability through messages streaming. | Use a model that supports full JSON streaming, or add a dedicated model-specific full JSON path. |
+| OpenAI tab loses `tools` on `MESSAGES_API` models (e.g. `gemma4-e2b-qnn`, `gemma4`) | The sample routes models with the `MESSAGES_API` capability through messages streaming, which only carries role/content messages. | Use the Tool API JSON field for direct `runModelHandleWithTool()` testing, or use `response_format` on a full JSON streaming model. |
 | `tools` are visible to the model but output is not schema-valid | OpenAI JSON `tools` only guide the chat template. | Use `runModelHandleWithTool()` and XGrammar for hard constraints. |
 | Chat tab says no active session | `openChatSession()` has not succeeded or the session was closed. | Open a session first, then call `runChatModelHandleStreaming()`. |
 

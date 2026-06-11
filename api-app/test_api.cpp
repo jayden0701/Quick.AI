@@ -7,6 +7,7 @@
  */
 
 #include "quick_dot_ai_api.h"
+#include "json.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -16,6 +17,8 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+
+using json = nlohmann::json;
 
 // ── ANSI color codes ─────────────────────────────────────────────────────────
 namespace clr {
@@ -153,6 +156,113 @@ static int run_tool_smoke(int argc, char *argv[]) {
   return 0;
 }
 
+static std::string read_required_string(const json &root, const char *key) {
+  if (!root.contains(key) || !root[key].is_string() ||
+      root[key].get<std::string>().empty()) {
+    throw std::runtime_error(std::string("Tool JSON must include ") + key);
+  }
+  return root[key].get<std::string>();
+}
+
+static std::string read_tool_name(const json &root) {
+  if (root.contains("tool_name") && root["tool_name"].is_string() &&
+      !root["tool_name"].get<std::string>().empty()) {
+    return root["tool_name"].get<std::string>();
+  }
+  if (root.contains("toolName") && root["toolName"].is_string() &&
+      !root["toolName"].get<std::string>().empty()) {
+    return root["toolName"].get<std::string>();
+  }
+  throw std::runtime_error("Tool JSON must include tool_name");
+}
+
+static std::string read_tool_schema(const json &root) {
+  const json *schema = nullptr;
+  if (root.contains("tool_schema")) {
+    schema = &root["tool_schema"];
+  } else if (root.contains("toolSchema")) {
+    schema = &root["toolSchema"];
+  }
+
+  if (schema == nullptr || schema->is_null()) {
+    return "";
+  }
+  if (schema->is_object()) {
+    return schema->dump();
+  }
+  if (schema->is_string()) {
+    return schema->get<std::string>();
+  }
+  throw std::runtime_error(
+    "tool_schema must be a JSON object, string, or null");
+}
+
+static int run_tool_json(int argc, char *argv[]) {
+  if (argc < 5) {
+    print_error("Usage: quick_dot_ai_test --tool-json <model_id> "
+                "<model_base_path> <tool_json> [quant]");
+    return 2;
+  }
+
+  const char *model_id = argv[2];
+  const char *model_base_path = argv[3];
+  const char *tool_json = argv[4];
+  const std::string quant_str = argc >= 6 ? argv[5] : "W4A32";
+
+  std::string prompt;
+  std::string tool_name;
+  std::string schema_storage;
+  try {
+    json root = json::parse(tool_json);
+    if (!root.is_object()) {
+      throw std::runtime_error("Tool JSON must be an object");
+    }
+    prompt = read_required_string(root, "prompt");
+    tool_name = read_tool_name(root);
+    schema_storage = read_tool_schema(root);
+  } catch (const std::exception &e) {
+    print_error(std::string("Invalid tool JSON: ") + e.what());
+    return 2;
+  }
+
+  Config config{};
+  config.use_chat_template = true;
+  config.debug_mode = false;
+  config.verbose = false;
+  config.chat_template_name = nullptr;
+  ErrorCode err = setOptions(config);
+  if (err != CAUSAL_LM_ERROR_NONE) {
+    print_error("setOptions failed (code " + std::to_string(err) + ")");
+    return 1;
+  }
+
+  CausalLmHandle handle = nullptr;
+  err = loadModelHandleByName(CAUSAL_LM_BACKEND_CPU, model_id,
+                              parse_quant(quant_str), nullptr,
+                              model_base_path, &handle);
+  if (err != CAUSAL_LM_ERROR_NONE) {
+    print_error("loadModelHandleByName failed (code " +
+                std::to_string(err) + ")");
+    return 1;
+  }
+
+  const char *output = nullptr;
+  const char *schema_arg =
+    schema_storage.empty() ? nullptr : schema_storage.c_str();
+  err = runModelHandleWithTool(handle, prompt.c_str(), &output,
+                               tool_name.c_str(), schema_arg);
+  if (err != CAUSAL_LM_ERROR_NONE) {
+    print_error("runModelHandleWithTool failed (code " +
+                std::to_string(err) + ")");
+    destroyModelHandle(handle);
+    return 1;
+  }
+
+  std::cout << (output != nullptr ? output : "") << "\n";
+  destroyModelHandle(handle);
+  return 0;
+}
+
 static int print_stream_delta(const char *delta, void *) {
   if (delta != nullptr)
     std::cout << delta << std::flush;
@@ -236,6 +346,9 @@ static void print_usage(const char *prog) {
   std::cout << clr::yellow << "│" << clr::reset << "  " << clr::bold_white
             << prog << clr::reset << " <model> [prompt] [chat_tpl] [quant] "
             << "[verbose]\n";
+  std::cout << clr::yellow << "│" << clr::reset << "  " << clr::bold_white
+            << prog << clr::reset << " --tool-json <model_id> "
+            << "<model_base_path> <tool_json> [quant]\n";
   std::cout << clr::yellow << "│" << clr::reset << "\n";
   print_kv("model", "qwen3-0.6b | gemma4-cpu | gemma4-e2b-qnn | function_gemma",
            clr::yellow);
@@ -258,6 +371,8 @@ int main(int argc, char *argv[]) {
 
   if (std::strcmp(argv[1], "--tool-smoke") == 0)
     return run_tool_smoke(argc, argv);
+  if (std::strcmp(argv[1], "--tool-json") == 0)
+    return run_tool_json(argc, argv);
   if (std::strcmp(argv[1], "--json-smoke") == 0)
     return run_json_smoke(argc, argv);
 

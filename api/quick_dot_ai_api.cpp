@@ -421,6 +421,27 @@ static std::string trim_wrapping_newlines(std::string value) {
   return value;
 }
 
+static bool erase_suffix(std::string &value, const std::string &suffix) {
+  if (suffix.empty() || value.size() < suffix.size())
+    return false;
+  if (value.compare(value.size() - suffix.size(), suffix.size(), suffix) != 0)
+    return false;
+  value.erase(value.size() - suffix.size());
+  return true;
+}
+
+static void trim_tool_output(std::string &value) {
+  value = trim_wrapping_newlines(std::move(value));
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto *suffix : {"<|endoftext|>", "<|im_end|>", "</s>"}) {
+      changed = erase_suffix(value, suffix) || changed;
+      value = trim_wrapping_newlines(std::move(value));
+    }
+  }
+}
+
 static void reset_handle_session_state(CausalLmModel &h) { h.kv_len = 0; }
 
 static void update_handle_session_after_run(CausalLmModel &h,
@@ -756,6 +777,31 @@ ErrorCode loadToolset(const char *toolset_path,
   }
 
   return CAUSAL_LM_ERROR_NONE;
+}
+
+static void initialize_xgrammar_for_handle_model(CausalLmModel &h,
+                                                 size_t model_index) {
+  if (model_index >= h.models.size() || model_index >= h.model_dirs.size() ||
+      !h.models[model_index]) {
+    LOGE("[XGrammar] Cannot initialize: missing model at index %zu",
+         model_index);
+    return;
+  }
+
+  auto *tokenizer = h.models[model_index]->getTokenizer();
+  if (tokenizer == nullptr) {
+    LOGE("[XGrammar] Cannot initialize: tokenizer is null for model index %zu",
+         model_index);
+    return;
+  }
+
+  unsigned int vocab_size = h.models[model_index]->getVocabSize();
+  causallm::XGrammarManager::Instance().initialize(tokenizer, vocab_size);
+
+  std::string default_toolset_path = h.model_dirs[model_index] + "/Toolset.json";
+  if (check_file_exists(default_toolset_path)) {
+    loadToolset(default_toolset_path.c_str(), tokenizer, vocab_size);
+  }
 }
 
 ErrorCode registerModelArchitecture(const char *arch_name,
@@ -1152,6 +1198,7 @@ static ErrorCode load_into_handle(CausalLmModel &h, BackendType compute,
         if (native_lib_dir != nullptr)
           h.native_lib_dir = native_lib_dir;
         h.initialized = true;
+        initialize_xgrammar_for_handle_model(h, text_generation_model_index(h));
 
         auto finish_init = std::chrono::high_resolution_clock::now();
         auto e2e = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1304,17 +1351,7 @@ static ErrorCode load_into_handle(CausalLmModel &h, BackendType compute,
       static_cast<double>(init_duration.count()));
     h.initialized = true;
 
-    // XGrammarManager Initalize
-    auto *tokenizer = h.models[0]->getTokenizer();
-    unsigned int vocab_size = h.models[0]->getVocabSize();
-    causallm::XGrammarManager::Instance().initialize(tokenizer, vocab_size);
-
-    // XGrammarManager Toolset Load
-    std::string default_toolset_path = abs_model_dir + "/Toolset.json";
-    bool toolset_file_exists = check_file_exists(default_toolset_path);
-    if (toolset_file_exists) {
-      loadToolset(default_toolset_path.c_str(), tokenizer, vocab_size);
-    }
+    initialize_xgrammar_for_handle_model(h, text_generation_model_index(h));
 
     LOGD("[DEBUG] load_into_handle: SINGLE SUCCESS (init took %lld ms)",
          init_duration.count());
@@ -1740,7 +1777,9 @@ ErrorCode runModelHandleWithTool(CausalLmHandle handle,
   }
 
   auto &h = *handle;
-  if (!h.initialized || h.models.empty() || !h.models[0]) {
+  const size_t model_index = text_generation_model_index(h);
+  if (!h.initialized || model_index >= h.models.size() ||
+      !h.models[model_index]) {
     return CAUSAL_LM_ERROR_NOT_INITIALIZED;
   }
 
@@ -1751,10 +1790,17 @@ ErrorCode runModelHandleWithTool(CausalLmHandle handle,
     return grammar_err;
 
   // Run inference using the handle
-  h.models[0]->setXGrammar(grammar);
-  ErrorCode err = run_on_handle(*handle, inputTextPrompt, outputText);
-  h.models[0]->resetXGrammar();
-  h.models[0]->setXGrammar(nullptr);
+  auto *model = h.models[model_index].get();
+  model->setXGrammar(grammar);
+  ErrorCode err = run_on_handle(*handle, inputTextPrompt, outputText,
+                                /*input_already_formatted=*/false,
+                                model_index);
+  if (err == CAUSAL_LM_ERROR_NONE && outputText != nullptr) {
+    trim_tool_output(h.last_output);
+    *outputText = h.last_output.c_str();
+  }
+  model->resetXGrammar();
+  model->setXGrammar(nullptr);
   return err;
 }
 

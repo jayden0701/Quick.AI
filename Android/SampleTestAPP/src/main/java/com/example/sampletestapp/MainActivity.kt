@@ -168,6 +168,19 @@ private val DARK = M3Tokens(
     codeFg = 0xFFCFBCFF.toInt(),
 )
 
+private val defaultToolApiJsonExample = """{
+  "prompt": "Return a compact web search request for Android AAR testing.",
+  "tool_name": "android_tool_api_direct",
+  "tool_schema": {
+    "type": "object",
+    "properties": {
+      "query": {"type": "string", "enum": ["android aar testing"]},
+      "count": {"type": "integer", "enum": [3]}
+    },
+    "required": ["query", "count"]
+  }
+}"""
+
 class MainActivity : AppCompatActivity() {
 
     /* ───── Engine plumbing (unchanged from the original sample) ───── */
@@ -225,6 +238,7 @@ class MainActivity : AppCompatActivity() {
   {"role": "system", "content": "Answer in one short sentence."},
   {"role": "user", "content": "Write a short joke about saving RAM."}
 ]"""
+    private var toolApiJsonText: String = defaultToolApiJsonExample
 
     private var statusText: String = "Idle."
     private var outputText: String = ""
@@ -256,6 +270,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var chatSeedField: EditText
     private lateinit var chatPromptField: EditText
     private lateinit var openAIMessagesField: EditText
+    private lateinit var toolApiJsonField: EditText
     private lateinit var chatModelBasePathField: EditText
     private lateinit var chatSessionStatusView: TextView
 
@@ -319,6 +334,7 @@ class MainActivity : AppCompatActivity() {
         if (::chatSeedField.isInitialized) seedText = chatSeedField.text.toString()
         if (::chatPromptField.isInitialized) chatPromptText = chatPromptField.text.toString()
         if (::openAIMessagesField.isInitialized) openAiJsonText = openAIMessagesField.text.toString()
+        if (::toolApiJsonField.isInitialized) toolApiJsonText = toolApiJsonField.text.toString()
 
         // Save scroll positions before rebuilding
         if (::mainScrollView.isInitialized) mainScrollY = mainScrollView.scrollY
@@ -1217,12 +1233,21 @@ class MainActivity : AppCompatActivity() {
             onOpenAIMessagesRunBlockingClicked()
         }.apply { isEnabled = !streaming && parseErr == null }
         actions.addView(blockingBtn)
-        spacerH(actions, 8)
-        val toolBtn = tonalButton(t, "Tool API") {
-            onToolSmokeClicked()
-        }.apply { isEnabled = !streaming }
-        actions.addView(toolBtn)
         card.addView(actions)
+        spacer(card, 14)
+
+        card.addView(labelView(t, "TOOL API JSON"))
+        toolApiJsonField = roundedEditText(t, toolApiJsonText, multiline = true, mono = true, rows = 7,
+            onTextChange = { toolApiJsonText = it })
+        card.addView(toolApiJsonField)
+        spacer(card, 10)
+
+        val toolActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val toolBtn = tonalButton(t, "▶  Run Tool JSON") {
+            onToolJsonRunClicked()
+        }.apply { isEnabled = !streaming }
+        toolActions.addView(toolBtn)
+        card.addView(toolActions)
         return card
     }
 
@@ -2645,11 +2670,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun onToolSmokeClicked() {
+    private fun onToolJsonRunClicked() {
+        val jsonText = toolApiJsonField.text.toString().trim()
+        if (jsonText.isBlank()) {
+            setStatus("Tool JSON is empty.")
+            return
+        }
+        val toolRequest = try {
+            ToolApiJsonRequest.parse(jsonText)
+        } catch (t: Throwable) {
+            setStatus("Tool JSON parse failed: ${t.message}")
+            return
+        }
+
+        toolApiJsonText = jsonText
         outputText = ""
         outputView.text = ""
         streaming = true
-        setStatus("Running XGrammar Tool API...")
+        setStatus("Running XGrammar Tool JSON...")
         mainHandler.post { rebuildUi() }
 
         val req = buildLoadRequest()
@@ -2675,27 +2713,16 @@ class MainActivity : AppCompatActivity() {
                 clearChatSessionState()
             }
 
-            val schema = """
-{
-  "type": "object",
-  "properties": {
-    "query": {"type": "string"},
-    "count": {"type": "integer"}
-  },
-  "required": ["query"]
-}
-""".trimIndent()
-
             try {
                 when (val r = e.runModelHandleWithTool(
-                    prompt = "Return a compact web search request for Android AAR testing.",
-                    toolName = "android_tool_api_smoke",
-                    toolSchema = schema
+                    prompt = toolRequest.prompt,
+                    toolName = toolRequest.toolName,
+                    toolSchema = toolRequest.toolSchema
                 )) {
                     is BackendResult.Ok -> {
                         outputText = r.value
                         streaming = false
-                        setStatus("Tool API done.")
+                        setStatus("Tool JSON done.")
                         mainHandler.post {
                             outputView.text = r.value
                             rebuildUi()
@@ -2703,13 +2730,13 @@ class MainActivity : AppCompatActivity() {
                     }
                     is BackendResult.Err -> {
                         streaming = false
-                        setStatus("Tool API failed: [${r.error.name}] ${r.message ?: ""}")
+                        setStatus("Tool JSON failed: [${r.error.name}] ${r.message ?: ""}")
                         mainHandler.post { rebuildUi() }
                     }
                 }
             } catch (t: Throwable) {
                 streaming = false
-                setStatus("Tool API threw: ${t.message}")
+                setStatus("Tool JSON threw: ${t.message}")
                 mainHandler.post { rebuildUi() }
             }
         }
