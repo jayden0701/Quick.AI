@@ -21,6 +21,7 @@
 #include <cxxabi.h>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -541,6 +542,9 @@ static void update_handle_session_after_run(CausalLmModel &h,
     return;
   h.kv_len = cb->read_kv_len(h.models[model_index].get());
 }
+
+static constexpr size_t kAutoTextGenerationModelIndex =
+  (std::numeric_limits<size_t>::max)();
 
 #ifdef ENABLE_QNN
 static causallm::Quick_Dot_AI_QNN *find_qnn_kv_cache_model(CausalLmModel &h) {
@@ -1481,12 +1485,17 @@ static ErrorCode load_into_handle(CausalLmModel &h, BackendType compute,
 static ErrorCode run_on_handle(CausalLmModel &h, const char *inputTextPrompt,
                                const char **outputText,
                                bool input_already_formatted = false,
-                               size_t model_index = 0) {
+                               size_t model_index =
+                                 kAutoTextGenerationModelIndex,
+                               causallm::XGrammar *tool_grammar = nullptr) {
   if (inputTextPrompt == nullptr || outputText == nullptr) {
     return CAUSAL_LM_ERROR_INVALID_PARAMETER;
   }
 
   std::lock_guard<std::mutex> lock(h.mtx);
+  if (model_index == kAutoTextGenerationModelIndex)
+    model_index = text_generation_model_index(h);
+
   if (!h.initialized || model_index >= h.models.size() ||
       !h.models[model_index]) {
     return CAUSAL_LM_ERROR_NOT_INITIALIZED;
@@ -1499,6 +1508,43 @@ static ErrorCode run_on_handle(CausalLmModel &h, const char *inputTextPrompt,
            model_index);
       return CAUSAL_LM_ERROR_UNSUPPORTED;
     }
+
+    std::unique_ptr<XGrammarLogitsProcessor> grammar_processor;
+
+    struct ScopedRunProcessor {
+      causallm::Transformer *model = nullptr;
+      bool detach_logits = false;
+#ifdef ENABLE_QNN
+      causallm::Quick_Dot_AI_QNN *qnn_model = nullptr;
+#endif
+
+      ~ScopedRunProcessor() {
+        if (detach_logits && model != nullptr)
+          model->setLogitsProcessor(nullptr);
+#ifdef ENABLE_QNN
+        if (qnn_model != nullptr)
+          qnn_model->resetXGrammar();
+#endif
+      }
+    } scoped_processor{model};
+
+    bool qnn_grammar_attached = false;
+#ifdef ENABLE_QNN
+    if (tool_grammar != nullptr) {
+      if (auto *qnn_model = as_qnn_model(model)) {
+        qnn_model->setXGrammar(tool_grammar);
+        scoped_processor.qnn_model = qnn_model;
+        qnn_grammar_attached = true;
+      }
+    }
+#endif
+    if (tool_grammar != nullptr && !qnn_grammar_attached) {
+      grammar_processor = std::make_unique<XGrammarLogitsProcessor>(
+        tool_grammar, [model]() { request_model_stop(model); });
+      model->setLogitsProcessor(grammar_processor.get());
+      scoped_processor.detach_logits = true;
+    }
+
     std::string input = prepare_input_for_model(
       h, model_index, std::string(inputTextPrompt), input_already_formatted);
 
@@ -1809,8 +1855,6 @@ ErrorCode runModelHandleWithTool(CausalLmHandle handle,
     return CAUSAL_LM_ERROR_INVALID_PARAMETER;
   }
 
-  auto &h = *handle;
-
   causallm::XGrammar *grammar = nullptr;
   // Step 1: Check if tool exists in XGrammarManager
   if (causallm::XGrammarManager::Instance().hasTool(tool_name)) {
@@ -1843,38 +1887,9 @@ ErrorCode runModelHandleWithTool(CausalLmHandle handle,
     return CAUSAL_LM_ERROR_UNKNOWN;
   }
 
-  size_t model_index = text_generation_model_index(h);
-  if (model_index >= h.models.size() || !h.models[model_index]) {
-    return CAUSAL_LM_ERROR_NOT_INITIALIZED;
-  }
-
-  auto *model = h.models[model_index].get();
-  XGrammarLogitsProcessor processor(grammar,
-                                    [model]() { request_model_stop(model); });
-#ifdef ENABLE_QNN
-  if (auto *qnn_model = as_qnn_model(model)) {
-    qnn_model->setXGrammar(grammar);
-    struct QnnGrammarDetach {
-      causallm::Quick_Dot_AI_QNN *model;
-      ~QnnGrammarDetach() { model->resetXGrammar(); }
-    } detach_guard{qnn_model};
-    return run_on_handle(*handle, inputTextPrompt, outputText,
-                         /*input_already_formatted=*/false, model_index);
-  }
-#endif
-  model->setLogitsProcessor(&processor);
-
-  struct LogitsProcessorDetach {
-    causallm::Transformer *model;
-    ~LogitsProcessorDetach() {
-      model->setLogitsProcessor(nullptr);
-    }
-  } detach_guard{model};
-
-  ErrorCode err =
-    run_on_handle(*handle, inputTextPrompt, outputText,
-                  /*input_already_formatted=*/false, model_index);
-  return err;
+  return run_on_handle(*handle, inputTextPrompt, outputText,
+                       /*input_already_formatted=*/false,
+                       kAutoTextGenerationModelIndex, grammar);
 }
 
 /*============================================================================
